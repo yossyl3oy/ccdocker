@@ -18,26 +18,31 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Check version change
+      - name: Check if release needed
         id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           CURRENT=$(grep -oP '\.version\s*=\s*"\K[^"]+' build.zig.zon)
           PREVIOUS=$(git show HEAD~1:build.zig.zon 2>/dev/null | grep -oP '\.version\s*=\s*"\K[^"]+' || echo "")
           echo "current=$CURRENT previous=$PREVIOUS"
-          if [ "$CURRENT" != "$PREVIOUS" ] && [ -n "$CURRENT" ]; then
+          TAG="v$CURRENT"
+          RELEASE_EXISTS=$(gh release view "$TAG" --json tagName 2>/dev/null && echo "true" || echo "false")
+          if [ "$RELEASE_EXISTS" = "false" ] && [ -n "$CURRENT" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "tag=v$CURRENT" >> "$GITHUB_OUTPUT"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create tag
+      - name: Create or update tag
         if: steps.version.outputs.changed == 'true'
         run: |
+          TAG="${{ steps.version.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
 
   build:
     needs: check
