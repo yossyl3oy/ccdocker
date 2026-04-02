@@ -7,7 +7,7 @@
 [![Release](https://img.shields.io/github/v/release/yossyl3oy/ccdocker)](https://github.com/yossyl3oy/ccdocker/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/yossyl3oy/ccdocker/release.yml)](https://github.com/yossyl3oy/ccdocker/actions)
 [![License](https://img.shields.io/github/license/yossyl3oy/ccdocker)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-macOS-blue)](https://github.com/yossyl3oy/ccdocker)
+[![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-blue)](https://github.com/yossyl3oy/ccdocker)
 
 Run [Claude Code](https://claude.ai) inside Docker with profile-based account management.
 
@@ -152,7 +152,7 @@ The Docker image (Debian slim) includes tools commonly used by Claude Code:
 ## Requirements
 
 - Docker Desktop or [OrbStack](https://orbstack.dev/) (commercial use requires a paid license)
-- macOS with Homebrew
+- macOS (Apple Silicon) with Homebrew
 
 ## License
 
