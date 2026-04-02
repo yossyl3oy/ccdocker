@@ -1,12 +1,13 @@
 <div align="center">
   <img src="assets/logo.png" width="256" alt="ccdocker logo">
   <h1>ccdocker</h1>
-</div>
 
 [![Release](https://img.shields.io/github/v/release/yossyl3oy/ccdocker)](https://github.com/yossyl3oy/ccdocker/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/yossyl3oy/ccdocker/release.yml)](https://github.com/yossyl3oy/ccdocker/actions)
 [![License](https://img.shields.io/github/license/yossyl3oy/ccdocker)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-blue)](https://github.com/yossyl3oy/ccdocker)
+
+</div>
 
 Run [Claude Code](https://claude.ai) inside Docker with profile-based account management.
 
