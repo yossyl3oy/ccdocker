@@ -1,0 +1,148 @@
+name: Release & Update Homebrew
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version_changed: ${{ steps.version.outputs.changed }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check version change
+        id: version
+        run: |
+          CURRENT=$(grep -oP '\.version\s*=\s*"\K[^"]+' build.zig.zon)
+          PREVIOUS=$(git show HEAD~1:build.zig.zon 2>/dev/null | grep -oP '\.version\s*=\s*"\K[^"]+' || echo "")
+          echo "current=$CURRENT previous=$PREVIOUS"
+          if [ "$CURRENT" != "$PREVIOUS" ] && [ -n "$CURRENT" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "tag=v$CURRENT" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create tag
+        if: steps.version.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${{ steps.version.outputs.tag }}"
+          git push origin "${{ steps.version.outputs.tag }}"
+
+  build:
+    needs: check
+    if: needs.check.outputs.version_changed == 'true'
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-macos
+            os: macos-14
+            arch: arm64
+          - target: x86_64-macos
+            os: macos-13
+            arch: amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseSafe
+
+      - name: Package
+        run: |
+          ARCHIVE="ccdocker-${{ needs.check.outputs.tag }}-darwin-${{ matrix.arch }}"
+          mkdir -p "$ARCHIVE"
+          cp zig-out/bin/ccdocker "$ARCHIVE/"
+          cp Dockerfile entrypoint.sh .dockerignore "$ARCHIVE/"
+          tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccdocker-darwin-${{ matrix.arch }}
+          path: "*.tar.gz"
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        run: gh release create "${{ needs.check.outputs.tag }}" --generate-notes *.tar.gz
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
+      - name: Compute SHA256
+        id: sha
+        run: |
+          SHA_ARM64=$(shasum -a 256 ccdocker-${{ needs.check.outputs.tag }}-darwin-arm64.tar.gz | cut -d' ' -f1)
+          SHA_AMD64=$(shasum -a 256 ccdocker-${{ needs.check.outputs.tag }}-darwin-amd64.tar.gz | cut -d' ' -f1)
+          echo "sha_arm64=$SHA_ARM64" >> "$GITHUB_OUTPUT"
+          echo "sha_amd64=$SHA_AMD64" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew Formula
+        run: |
+          VERSION="${{ needs.check.outputs.tag }}"
+          VERSION="${VERSION#v}"
+          BASE_URL="https://github.com/yossyl3oy/ccdocker/releases/download/${{ needs.check.outputs.tag }}"
+
+          git clone https://x-access-token:${{ secrets.TAP_TOKEN }}@github.com/yossyl3oy/homebrew-ccdocker.git tap
+          cd tap
+
+          cat > Formula/ccdocker.rb << 'EOF'
+          class Ccdocker < Formula
+            desc "Run Claude Code in Docker with profile management"
+            homepage "https://github.com/yossyl3oy/ccdocker"
+            version "VERSION_PLACEHOLDER"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "URL_PLACEHOLDER/ccdocker-TAG_PLACEHOLDER-darwin-arm64.tar.gz"
+                sha256 "SHA_ARM64_PLACEHOLDER"
+              else
+                url "URL_PLACEHOLDER/ccdocker-TAG_PLACEHOLDER-darwin-amd64.tar.gz"
+                sha256 "SHA_AMD64_PLACEHOLDER"
+              end
+            end
+
+            def install
+              libexec.install "ccdocker", "Dockerfile", "entrypoint.sh", ".dockerignore"
+              bin.install_symlink libexec/"ccdocker"
+            end
+
+            test do
+              assert_match "ccdocker", shell_output("#{bin}/ccdocker -v")
+            end
+          end
+          EOF
+
+          sed -i "s|VERSION_PLACEHOLDER|$VERSION|" Formula/ccdocker.rb
+          sed -i "s|TAG_PLACEHOLDER|${{ needs.check.outputs.tag }}|g" Formula/ccdocker.rb
+          sed -i "s|URL_PLACEHOLDER|$BASE_URL|g" Formula/ccdocker.rb
+          sed -i "s|SHA_ARM64_PLACEHOLDER|${{ steps.sha.outputs.sha_arm64 }}|" Formula/ccdocker.rb
+          sed -i "s|SHA_AMD64_PLACEHOLDER|${{ steps.sha.outputs.sha_amd64 }}|" Formula/ccdocker.rb
+          sed -i 's/^          //' Formula/ccdocker.rb
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ccdocker.rb
+          git commit -m "Update ccdocker to $VERSION"
+          git push

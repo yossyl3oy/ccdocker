@@ -1,0 +1,8 @@
+.git
+*.md
+.build_hash
+zig-out/
+.zig-cache/
+src/
+build.zig
+build.zig.zon
