@@ -1,8 +1,7 @@
-<p align="center">
+<div align="center">
   <img src="assets/logo.png" width="256" alt="ccdocker logo">
-</p>
-
-# ccdocker
+  <h1>ccdocker</h1>
+</div>
 
 [![Release](https://img.shields.io/github/v/release/yossyl3oy/ccdocker)](https://github.com/yossyl3oy/ccdocker/releases)
 [![Build](https://img.shields.io/github/actions/workflow/status/yossyl3oy/ccdocker/release.yml)](https://github.com/yossyl3oy/ccdocker/actions)
