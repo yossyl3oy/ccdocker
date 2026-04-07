@@ -6,6 +6,7 @@ const engine = @import("core/engine.zig");
 const args_mod = @import("modules/args.zig");
 const config = @import("modules/config.zig");
 const docker = @import("modules/docker.zig");
+const clipboard = @import("modules/clipboard.zig");
 const packages = @import("modules/packages.zig");
 const mounts = @import("modules/mounts.zig");
 
@@ -38,6 +39,17 @@ pub fn main() !void {
     defer parsed.deinit(allocator);
 
     switch (parsed.command) {
+        ._clipboard_daemon => {
+            if (parsed.exec_args.items.len < 2) {
+                print("Usage: ccdocker _clipboard-daemon <port> <token>\n", .{});
+                std.process.exit(1);
+            }
+            const port = std.fmt.parseInt(u16, parsed.exec_args.items[0], 10) catch {
+                print("Error: invalid port\n", .{});
+                std.process.exit(1);
+            };
+            clipboard.runDaemon(port, parsed.exec_args.items[1]);
+        },
         .version => {
             print("ccdocker {s}\n", .{utils.version});
             return;
@@ -94,11 +106,25 @@ pub fn main() !void {
             defer allocator.free(config_mount);
 
             const login_argv = [_][]const u8{
-                "docker",      "run",  "--rm",                              "-it",
-                "-e",          "CLAUDE_CONFIG_DIR=/root/.claude",           "-v",
-                config_mount,  utils.image_name,                           "login",
+                "docker",         "run",                             "--rm", "-it",
+                "-e",             "CLAUDE_CONFIG_DIR=/root/.claude", "-v",   config_mount,
+                utils.image_name, "login",
             };
             return engine.execCmd(&login_argv);
+        },
+        .connect => {
+            try resolveProfile(allocator, &parsed, null);
+            engine.ensureDocker(allocator, parsed.dry_run);
+            const dockerfile_dir = try engine.getDockerfileDir(allocator);
+            defer allocator.free(dockerfile_dir);
+            try engine.ensureImage(allocator, dockerfile_dir);
+
+            const work_dir = try docker.resolveWorkDir(allocator, parsed.path);
+            defer allocator.free(work_dir);
+            const config_host = try config.profileDir(allocator, parsed.profile);
+            defer allocator.free(config_host);
+
+            try docker.execExecCmd(allocator, work_dir, config_host, &.{"bash"});
         },
         .exec => {
             try resolveProfile(allocator, &parsed, null);
@@ -143,12 +169,14 @@ comptime {
     _ = @import("modules/docker.zig");
     _ = @import("modules/packages.zig");
     _ = @import("modules/mounts.zig");
+    _ = @import("modules/clipboard.zig");
 }
 
 fn printHelp() void {
     prints(
         \\Usage: ccdocker [path] [options]
         \\       ccdocker exec [-p <profile>] <command...>
+        \\       ccdocker connect
         \\       ccdocker login [-p <profile>]
         \\       ccdocker set <profile>
         \\       ccdocker profile list
@@ -161,6 +189,7 @@ fn printHelp() void {
         \\
         \\Commands:
         \\  exec <command...>     Run a command in the container
+        \\  connect               Open bash in a running container
         \\  login                 Login to Claude subscription
         \\  set <profile>         Set default profile for current directory
         \\  profile list          List profiles (* = active in current dir)
@@ -188,6 +217,7 @@ fn printHelp() void {
         \\  ccdocker profile list       List all profiles
         \\  ccdocker exec curl google.com    Run curl inside the container
         \\  ccdocker exec -p work bash       Start a bash shell with work profile
+        \\  ccdocker connect                 Attach bash to running container
         \\  ccdocker install tig           Install tig into image
         \\  ccdocker install tig yarn      Install multiple packages
         \\  ccdocker remove tig            Remove tig from image

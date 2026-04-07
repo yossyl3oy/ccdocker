@@ -44,7 +44,11 @@ case "${1:-}" in
   *)
     check_update
     echo "Starting Claude Code..."
-    claude
+    if command -v pty-proxy &>/dev/null && [ -n "${CCDOCKER_CLIP_PORT:-}" ]; then
+      pty-proxy claude
+    else
+      claude
+    fi
     echo "Claude exited. Stopping container."
     ;;
 esac

@@ -224,6 +224,20 @@ fn computeHash(allocator: std.mem.Allocator, dir: []const u8, packages: []const 
     defer allocator.free(ep_content);
     hasher.update(ep_content);
 
+    const clip_shim = try fs.path.join(allocator, &.{ dir, "clipboard-shim.sh" });
+    defer allocator.free(clip_shim);
+    if (readFileContent(allocator, clip_shim)) |cs_content| {
+        defer allocator.free(cs_content);
+        hasher.update(cs_content);
+    } else |_| {}
+
+    const pty_proxy = try fs.path.join(allocator, &.{ dir, "pty-proxy" });
+    defer allocator.free(pty_proxy);
+    if (readFileContent(allocator, pty_proxy)) |pp_content| {
+        defer allocator.free(pp_content);
+        hasher.update(pp_content);
+    } else |_| {}
+
     for (packages) |pkg| {
         hasher.update(pkg);
     }

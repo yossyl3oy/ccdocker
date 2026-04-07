@@ -1,7 +1,9 @@
 const std = @import("std");
 const fs = std.fs;
+const mem = std.mem;
 const utils = @import("../core/utils.zig");
 const engine = @import("../core/engine.zig");
+const clipboard = @import("clipboard.zig");
 const mounts_mod = @import("mounts.zig");
 const print = utils.print;
 
@@ -69,6 +71,118 @@ fn appendOptionalReadonlyMount(
     } else |_| {}
 }
 
+fn appendEnvFlag(
+    args: *std.ArrayList([]const u8),
+    owned: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    env_spec: []const u8,
+) !void {
+    try owned.append(allocator, env_spec);
+    try args.append(allocator, "-e");
+    try args.append(allocator, env_spec);
+}
+
+fn appendTerminalArgs(
+    argv: *std.ArrayList([]const u8),
+    owned: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+) !void {
+    // Forward TERM so the container detects terminal capabilities (image paste, colors)
+    if (std.posix.getenv("TERM")) |term| {
+        const val = try std.fmt.allocPrint(allocator, "TERM={s}", .{term});
+        try appendEnvFlag(argv, owned, allocator, val);
+    }
+
+    // Forward COLORTERM for true-color support detection
+    if (std.posix.getenv("COLORTERM")) |ct| {
+        const val = try std.fmt.allocPrint(allocator, "COLORTERM={s}", .{ct});
+        try appendEnvFlag(argv, owned, allocator, val);
+    }
+}
+
+fn appendMirroredReadonlyMount(
+    argv: *std.ArrayList([]const u8),
+    owned: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    host_path: []const u8,
+) !void {
+    try appendOptionalReadonlyMount(argv, owned, allocator, host_path, host_path);
+
+    var real_buf: [fs.max_path_bytes]u8 = undefined;
+    const real_path = fs.cwd().realpath(host_path, &real_buf) catch return;
+    if (!mem.eql(u8, real_path, host_path)) {
+        try appendOptionalReadonlyMount(argv, owned, allocator, real_path, real_path);
+    }
+}
+
+fn appendImagePasteMounts(
+    argv: *std.ArrayList([]const u8),
+    owned: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+) !void {
+    const tmpdir = std.posix.getenv("TMPDIR") orelse return;
+    try appendMirroredReadonlyMount(argv, owned, allocator, tmpdir);
+}
+
+// ── Clipboard bridge ──────────────────────────────────────────────────
+
+const ClipboardDaemon = struct {
+    port: u16,
+    token: [32]u8,
+};
+
+/// Fork a child process that runs the built-in clipboard daemon.
+/// Returns the bound port and auth token on success so the caller can pass them to Docker.
+fn startClipboardDaemon() ?ClipboardDaemon {
+    // Random auth token (hex-encoded)
+    var raw: [16]u8 = undefined;
+    std.crypto.random.bytes(&raw);
+    const token_hex = std.fmt.bytesToHex(raw, .lower);
+
+    const pipe_fds = std.posix.pipe() catch return null;
+    errdefer {
+        std.posix.close(pipe_fds[0]);
+        std.posix.close(pipe_fds[1]);
+    }
+
+    const pid = std.posix.fork() catch return null;
+    if (pid == 0) {
+        std.posix.close(pipe_fds[0]);
+        clipboard.runDaemonWithReadyFd(0, &token_hex, pipe_fds[1]);
+    }
+
+    std.posix.close(pipe_fds[1]);
+    defer std.posix.close(pipe_fds[0]);
+
+    var port_buf: [2]u8 = undefined;
+    var read_total: usize = 0;
+    while (read_total < port_buf.len) {
+        const n = std.posix.read(pipe_fds[0], port_buf[read_total..]) catch return null;
+        if (n == 0) return null;
+        read_total += n;
+    }
+
+    const port = std.mem.readInt(u16, &port_buf, .little);
+    if (port == 0) return null;
+
+    return .{ .port = port, .token = token_hex };
+}
+
+/// Append -e flags that let the clipboard shim inside the container
+/// reach the host-side daemon.
+fn appendClipboardArgs(
+    argv: *std.ArrayList([]const u8),
+    owned: *std.ArrayList([]const u8),
+    allocator: std.mem.Allocator,
+    daemon: ClipboardDaemon,
+) !void {
+    const port_env = try std.fmt.allocPrint(allocator, "CCDOCKER_CLIP_PORT={d}", .{daemon.port});
+    try appendEnvFlag(argv, owned, allocator, port_env);
+
+    const token_env = try std.fmt.allocPrint(allocator, "CCDOCKER_CLIP_TOKEN={s}", .{daemon.token});
+    try appendEnvFlag(argv, owned, allocator, token_env);
+}
+
 pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_host: []const u8, exec_args: []const []const u8) !void {
     var argv: std.ArrayList([]const u8) = .{};
     defer argv.deinit(allocator);
@@ -85,12 +199,15 @@ pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_ho
     const home = utils.getHomeDir();
 
     const base_args = [_][]const u8{
-        "docker", "run", "--rm", "-it",
-        "--memory=1g", "--memory-swap=1g",
-        "-e", "CLAUDE_CONFIG_DIR=/root/.claude",
+        "docker",       "run",              "--rm", "-it",
+        "--memory=1g",  "--memory-swap=1g", "-e",   "CLAUDE_CONFIG_DIR=/root/.claude",
         "--entrypoint", exec_args[0],
     };
     try argv.appendSlice(allocator, &base_args);
+
+    // Preserve terminal capabilities and host temp-file access for image paste.
+    try appendTerminalArgs(&argv, &owned, allocator);
+    try appendImagePasteMounts(&argv, &owned, allocator);
 
     // Git mounts
     const gitconfig = try fs.path.join(allocator, &.{ home, ".gitconfig" });
@@ -117,6 +234,11 @@ pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_ho
         defer allocator.free(paths.host);
         defer allocator.free(paths.container);
         try appendOptionalReadonlyMount(&argv, &owned, allocator, paths.host, paths.container);
+    }
+
+    // Clipboard daemon: fork helper on host, pass token/port to container
+    if (startClipboardDaemon()) |daemon| {
+        try appendClipboardArgs(&argv, &owned, allocator, daemon);
     }
 
     // Work dir and config mounts
@@ -175,11 +297,14 @@ pub fn execRunCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_hos
     const home = utils.getHomeDir();
 
     const base_args = [_][]const u8{
-        "docker", "run", "--rm", "-it",
-        "--memory=1g", "--memory-swap=1g",
-        "-e", "CLAUDE_CONFIG_DIR=/root/.claude",
+        "docker",      "run",              "--rm", "-it",
+        "--memory=1g", "--memory-swap=1g", "-e",   "CLAUDE_CONFIG_DIR=/root/.claude",
     };
     try argv.appendSlice(allocator, &base_args);
+
+    // Preserve terminal capabilities and host temp-file access for image paste.
+    try appendTerminalArgs(&argv, &owned, allocator);
+    try appendImagePasteMounts(&argv, &owned, allocator);
 
     // Git mounts
     const gitconfig = try fs.path.join(allocator, &.{ home, ".gitconfig" });
@@ -208,9 +333,16 @@ pub fn execRunCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_hos
         try appendOptionalReadonlyMount(&argv, &owned, allocator, paths.host, paths.container);
     }
 
+    // Clipboard daemon: fork helper on host, pass token/port to container
+    if (startClipboardDaemon()) |daemon| {
+        try appendClipboardArgs(&argv, &owned, allocator, daemon);
+    }
+
     // Work dir and config mounts
     try appendVolumeFlag(&argv, &owned, allocator, work_mount);
     try appendVolumeFlag(&argv, &owned, allocator, config_mount);
+
+    // Image name must come last — everything after is treated as the container command
     try argv.append(allocator, utils.image_name);
 
     engine.execCmd(argv.items);
@@ -232,4 +364,21 @@ test "resolveExtraMountPaths maps home-relative paths under root" {
 
     try testing.expectEqualStrings("/Users/test/.aws", paths.host);
     try testing.expectEqualStrings("/root/.aws", paths.container);
+}
+
+test "appendMirroredReadonlyMount keeps original mount path" {
+    var argv: std.ArrayList([]const u8) = .{};
+    defer argv.deinit(testing.allocator);
+
+    var owned: std.ArrayList([]const u8) = .{};
+    defer {
+        for (owned.items) |arg| testing.allocator.free(arg);
+        owned.deinit(testing.allocator);
+    }
+
+    try appendMirroredReadonlyMount(&argv, &owned, testing.allocator, "/tmp");
+
+    try testing.expect(argv.items.len >= 2);
+    try testing.expectEqualStrings("-v", argv.items[0]);
+    try testing.expect(mem.startsWith(u8, argv.items[1], "/tmp:/tmp:ro"));
 }

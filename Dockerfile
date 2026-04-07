@@ -30,4 +30,19 @@ WORKDIR /work
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# PTY proxy: intercepts bracketed paste for image clipboard detection
+COPY pty-proxy /usr/local/bin/pty-proxy
+RUN chmod +x /usr/local/bin/pty-proxy
+
+# Clipboard bridge: shim scripts that forward to host clipboard daemon
+COPY clipboard-shim.sh /usr/local/bin/clipboard-shim
+RUN chmod +x /usr/local/bin/clipboard-shim \
+  && ln -sf clipboard-shim /usr/local/bin/xclip \
+  && ln -sf clipboard-shim /usr/local/bin/xsel \
+  && ln -sf clipboard-shim /usr/local/bin/wl-paste \
+  && ln -sf clipboard-shim /usr/local/bin/wl-copy \
+  && ln -sf clipboard-shim /usr/local/bin/pbpaste \
+  && ln -sf clipboard-shim /usr/local/bin/pbcopy \
+  && ln -sf clipboard-shim /usr/local/bin/pngpaste
+
 ENTRYPOINT ["/entrypoint.sh"]

@@ -3,7 +3,7 @@ const mem = std.mem;
 const utils = @import("../core/utils.zig");
 const fatal = utils.fatal;
 
-pub const Command = enum { run, exec, login, profile_list, profile_set, install, remove, package_list, mount_add, mount_remove, mount_list, version, help };
+pub const Command = enum { run, exec, connect, login, profile_list, profile_set, install, remove, package_list, mount_add, mount_remove, mount_list, version, help, _clipboard_daemon };
 
 pub const ParsedArgs = struct {
     command: Command,
@@ -91,6 +91,16 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParsedA
         } else if (mem.eql(u8, args[0], "exec")) {
             result.command = .exec;
             i = 1;
+        } else if (mem.eql(u8, args[0], "connect")) {
+            result.command = .connect;
+            return result;
+        } else if (mem.eql(u8, args[0], "_clipboard-daemon")) {
+            result.command = ._clipboard_daemon;
+            // Remaining args: <port> <token>
+            for (args[1..]) |arg| {
+                result.exec_args.append(allocator, allocator.dupe(u8, arg) catch fatal("Out of memory\n")) catch fatal("Out of memory\n");
+            }
+            return result;
         } else if (mem.eql(u8, args[0], "install")) {
             result.command = .install;
             if (args.len < 2) fatal("Usage: ccdocker install <package...>\n");

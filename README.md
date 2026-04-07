@@ -22,6 +22,7 @@ Run [Claude Code](https://claude.ai) inside Docker with profile-based account ma
 - Auto-detects and offers to install Docker Desktop or OrbStack
 - Auto-rebuilds the image when Dockerfile changes
 - Checks for Claude Code updates on container start
+- Image paste support via clipboard bridge and host temp-file mounts
 - Shares Git config, GitHub CLI auth, and SSH keys with the container
 - Lightweight Debian-based image with essential dev tools pre-installed
 
@@ -114,8 +115,15 @@ Per-directory default profiles are stored in `~/.config/ccdocker/config.json`.
 | `~/.gitconfig` | `/root/.gitconfig` | read-only |
 | `~/.config/gh/` | `/root/.config/gh` | read-only |
 | `~/.ssh/` | `/root/.ssh` | read-only |
+| `$TMPDIR` (and its realpath alias) | same path on host | read-only |
 
-The bottom three are mounted only if they exist on the host.
+The bottom four are mounted only if they exist on the host.
+
+## Image Paste
+
+`ccdocker` mirrors the macOS clipboard into the container and also mounts the host temporary directory that terminals often use when pasting screenshots or copied images.
+
+If image paste still does not trigger in Claude Code, use `Ctrl+V` inside the Claude prompt rather than your terminal's generic paste shortcut.
 
 ### Extra Mounts
 
