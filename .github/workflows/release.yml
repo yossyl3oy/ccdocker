@@ -62,8 +62,8 @@ jobs:
         run: |
           ARCHIVE="ccdocker-${{ needs.check.outputs.tag }}-darwin-arm64"
           mkdir -p "$ARCHIVE"
-          cp zig-out/bin/ccdocker "$ARCHIVE/"
-          cp Dockerfile entrypoint.sh .dockerignore "$ARCHIVE/"
+          cp zig-out/bin/ccdocker zig-out/bin/pty-proxy "$ARCHIVE/"
+          cp Dockerfile entrypoint.sh .dockerignore clipboard-shim.sh "$ARCHIVE/"
           tar czf "$ARCHIVE.tar.gz" "$ARCHIVE"
 
       - uses: actions/upload-artifact@v4
@@ -113,7 +113,7 @@ jobs:
             sha256 "SHA_PLACEHOLDER"
 
             def install
-              libexec.install "ccdocker", "Dockerfile", "entrypoint.sh", ".dockerignore"
+              libexec.install "ccdocker", "pty-proxy", "Dockerfile", "entrypoint.sh", ".dockerignore", "clipboard-shim.sh"
               bin.install_symlink libexec/"ccdocker"
             end
 
