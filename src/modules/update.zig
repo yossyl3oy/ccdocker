@@ -44,7 +44,7 @@ pub fn refreshCacheInBackground(allocator: std.mem.Allocator) void {
         std.process.exit(0);
     }
 
-    _ = std.posix.waitpid(pid, 0) catch {};
+    _ = std.posix.waitpid(pid, 0);
 }
 
 // ── Version comparison ───────────────────────────────────────────────
