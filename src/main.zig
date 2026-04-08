@@ -7,6 +7,7 @@ const args_mod = @import("modules/args.zig");
 const config = @import("modules/config.zig");
 const docker = @import("modules/docker.zig");
 const clipboard = @import("modules/clipboard.zig");
+const update = @import("modules/update.zig");
 const packages = @import("modules/packages.zig");
 const mounts = @import("modules/mounts.zig");
 
@@ -155,6 +156,9 @@ pub fn main() !void {
             print("Mounting: {s}\n", .{work_dir});
             print("Profile: {s}\n", .{parsed.profile});
 
+            update.notifyFromCache(allocator);
+            update.refreshCacheInBackground(allocator);
+
             try docker.execRunCmd(allocator, work_dir, config_host);
         },
     }
@@ -170,6 +174,7 @@ comptime {
     _ = @import("modules/packages.zig");
     _ = @import("modules/mounts.zig");
     _ = @import("modules/clipboard.zig");
+    _ = @import("modules/update.zig");
 }
 
 fn printHelp() void {
