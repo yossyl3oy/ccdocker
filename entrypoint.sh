@@ -30,7 +30,6 @@ check_update() {
   if [[ "$answer" =~ ^[Yy]$ ]]; then
     echo "Updating Claude Code..."
     curl -fsSL https://claude.ai/install.sh | bash
-    cp -a /root/.local/bin/. /usr/local/bin/
     echo "Updated to $(claude --version 2>/dev/null | head -1)"
   fi
 }

@@ -104,6 +104,8 @@ ccdocker profile list
 
 Profiles are stored in `~/.claude-profiles/<name>/`.
 
+Claude Code updates are stored under each profile's `.local` directory so they persist across container restarts.
+
 Per-directory default profiles are stored in `~/.config/ccdocker/config.json`.
 
 ## Volume Mounts
@@ -112,6 +114,7 @@ Per-directory default profiles are stored in `~/.config/ccdocker/config.json`.
 |------|-----------|------|
 | Current directory (or specified path) | `/work` | read-write |
 | `~/.claude-profiles/<profile>/` | `/root/.claude` | read-write |
+| `~/.claude-profiles/<profile>/.local/` | `/root/.local` | read-write |
 | `~/.gitconfig` | `/root/.gitconfig` | read-only |
 | `~/.config/gh/` | `/root/.config/gh` | read-only |
 | `~/.ssh/` | `/root/.ssh` | read-only |

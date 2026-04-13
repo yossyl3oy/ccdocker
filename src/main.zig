@@ -105,10 +105,16 @@ pub fn main() !void {
 
             const config_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.claude", .{config_host});
             defer allocator.free(config_mount);
+            const local_host = try std.fs.path.join(allocator, &.{ config_host, ".local" });
+            defer allocator.free(local_host);
+            std.fs.cwd().makePath(local_host) catch {};
+            const local_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.local", .{local_host});
+            defer allocator.free(local_mount);
 
             const login_argv = [_][]const u8{
                 "docker",         "run",                             "--rm", "-it",
                 "-e",             "CLAUDE_CONFIG_DIR=/root/.claude", "-v",   config_mount,
+                "-v",             local_mount,
                 utils.image_name, "login",
             };
             return engine.execCmd(&login_argv);
