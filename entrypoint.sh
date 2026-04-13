@@ -3,33 +3,35 @@ set -euo pipefail
 
 # ─── Check for Claude Code update ───
 check_update() {
-  local current latest
+  local current latest check
   current=$(claude --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+') || return
-  latest=$(curl -fsSL --max-time 5 https://claude.ai/install.sh 2>/dev/null \
-    | grep -oE 'latest|[0-9]+\.[0-9]+\.[0-9]+' | tail -1) || return
 
-  # If can't determine latest, try installing and check
-  if [[ "$latest" == "latest" ]] || [[ -z "$latest" ]]; then
-    echo "Claude Code: v${current} (checking for updates...)"
-    local check
-    check=$(curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash -s -- --check 2>&1) || true
-    if echo "$check" | grep -qi "up to date"; then
-      echo "Claude Code: v${current} (up to date)"
-      return
-    fi
+  check=$(curl -fsSL --max-time 5 https://claude.ai/install.sh 2>/dev/null | bash -s -- --check 2>&1) || true
+
+  if [[ -z "$check" ]]; then
+    echo "Claude Code: v${current}"
+    return
   fi
 
-  if [[ -n "$latest" ]] && [[ "$latest" != "latest" ]] && [[ "$current" != "$latest" ]]; then
-    echo "Claude Code: v${current} -> v${latest} available"
-    read -rp "Update? [y/N]: " answer
-    if [[ "$answer" =~ ^[Yy]$ ]]; then
-      echo "Updating Claude Code..."
-      curl -fsSL https://claude.ai/install.sh | bash
-      cp -a /root/.local/bin/. /usr/local/bin/
-      echo "Updated to $(claude --version 2>/dev/null | head -1)"
-    fi
-  else
+  if echo "$check" | grep -qi "up to date"; then
     echo "Claude Code: v${current} (up to date)"
+    return
+  fi
+
+  latest=$(echo "$check" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1) || true
+
+  if [[ -n "$latest" ]] && [[ "$current" != "$latest" ]]; then
+    echo "Claude Code: v${current} -> v${latest} available"
+  else
+    echo "Claude Code: v${current} (update available)"
+  fi
+
+  read -rp "Update? [y/N]: " answer
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    echo "Updating Claude Code..."
+    curl -fsSL https://claude.ai/install.sh | bash
+    cp -a /root/.local/bin/. /usr/local/bin/
+    echo "Updated to $(claude --version 2>/dev/null | head -1)"
   fi
 }
 
