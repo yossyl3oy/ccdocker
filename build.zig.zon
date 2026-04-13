@@ -1,7 +1,7 @@
 .{
     .name = .ccdocker,
     .fingerprint = 0xc28f7047f205369f,
-    .version = "0.3.2",
+    .version = "0.4.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",

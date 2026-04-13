@@ -21,7 +21,7 @@ Run [Claude Code](https://claude.ai) inside Docker with profile-based account ma
 - Per-directory default profile (`ccdocker set work`)
 - Auto-detects and offers to install Docker Desktop or OrbStack
 - Auto-rebuilds the image when Dockerfile changes
-- Checks for Claude Code updates on container start
+- Detects Claude Code updates and rebuilds the image automatically
 - Image paste support via clipboard bridge and host temp-file mounts
 - Shares Git config, GitHub CLI auth, and SSH keys with the container
 - Lightweight Debian-based image with essential dev tools pre-installed
@@ -104,8 +104,6 @@ ccdocker profile list
 
 Profiles are stored in `~/.claude-profiles/<name>/`.
 
-Claude Code updates are stored under each profile's `.local` directory so they persist across container restarts.
-
 Per-directory default profiles are stored in `~/.config/ccdocker/config.json`.
 
 ## Volume Mounts
@@ -114,7 +112,6 @@ Per-directory default profiles are stored in `~/.config/ccdocker/config.json`.
 |------|-----------|------|
 | Current directory (or specified path) | `/work` | read-write |
 | `~/.claude-profiles/<profile>/` | `/root/.claude` | read-write |
-| `~/.claude-profiles/<profile>/.local/` | `/root/.local` | read-write |
 | `~/.gitconfig` | `/root/.gitconfig` | read-only |
 | `~/.config/gh/` | `/root/.config/gh` | read-only |
 | `~/.ssh/` | `/root/.ssh` | read-only |

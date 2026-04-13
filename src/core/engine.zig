@@ -207,6 +207,63 @@ pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, pa
         defer file.close();
         file.writeAll(current_hash) catch {};
     } else |_| {}
+
+    // Cache the installed Claude Code version
+    cacheInstalledClaudeVersion(allocator);
+}
+
+/// Delete the build hash file to force a rebuild on the next ensureImage() call.
+pub fn invalidateBuildHash(allocator: std.mem.Allocator, dockerfile_dir: []const u8) void {
+    const hash_path = fs.path.join(allocator, &.{ dockerfile_dir, ".build_hash" }) catch return;
+    defer allocator.free(hash_path);
+    fs.cwd().deleteFile(hash_path) catch {};
+}
+
+/// Run `docker run --rm --entrypoint claude <image> --version` and cache the version.
+pub fn cacheInstalledClaudeVersion(allocator: std.mem.Allocator) void {
+    var child = std.process.Child.init(
+        &.{ "docker", "run", "--rm", "--entrypoint", "claude", utils.image_name, "--version" },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return;
+
+    const stdout = child.stdout.?;
+    var buf: [256]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = stdout.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    const term = child.wait() catch return;
+    switch (term) {
+        .Exited => |code| if (code != 0) return,
+        else => return,
+    }
+
+    // Extract version (N.N.N) from output like "2.1.104 (Claude Code)"
+    const version = extractVersion(buf[0..total]) orelse return;
+
+    const update = @import("../modules/update.zig");
+    update.cacheClaudeInstalledVersion(allocator, version);
+}
+
+/// Extract a semver (N.N.N) from a string like "2.1.104 (Claude Code)".
+pub fn extractVersion(input: []const u8) ?[]const u8 {
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        if (input[i] >= '0' and input[i] <= '9') {
+            const start = i;
+            var dots: usize = 0;
+            while (i < input.len and (input[i] >= '0' and input[i] <= '9' or input[i] == '.')) : (i += 1) {
+                if (input[i] == '.') dots += 1;
+            }
+            if (dots == 2 and i > start) return input[start..i];
+        }
+    }
+    return null;
 }
 
 fn computeHash(allocator: std.mem.Allocator, dir: []const u8, packages: []const []const u8) ![]const u8 {
@@ -260,4 +317,17 @@ test "prepareExecArgv NUL terminates dynamic arguments" {
     try testing.expect(prepared.argv[2] == null);
     try testing.expect(prepared.owned_args[1][prepared.owned_args[1].len] == 0);
     try testing.expectEqualStrings(dynamic, prepared.owned_args[1][0..prepared.owned_args[1].len]);
+}
+
+test "extractVersion from claude --version output" {
+    try testing.expectEqualStrings("2.1.104", extractVersion("2.1.104 (Claude Code)").?);
+}
+
+test "extractVersion from plain version" {
+    try testing.expectEqualStrings("2.1.104", extractVersion("2.1.104").?);
+}
+
+test "extractVersion returns null for no version" {
+    try testing.expect(extractVersion("no version here") == null);
+    try testing.expect(extractVersion("") == null);
 }

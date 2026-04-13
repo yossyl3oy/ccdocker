@@ -186,6 +186,217 @@ fn fetchLatestTag(allocator: std.mem.Allocator) ?[]const u8 {
     return parseJsonString(allocator, body.items, "\"tag_name\"");
 }
 
+// ── Claude Code version check ───────────────────────────────────────
+
+const gcs_url = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest";
+
+fn getClaudeCachePath(allocator: std.mem.Allocator) ?[]const u8 {
+    const home = std.posix.getenv("HOME") orelse return null;
+    return fs.path.join(allocator, &.{ home, ".config", "ccdocker", "claude-cli-check.json" }) catch null;
+}
+
+/// Called by engine.zig after a successful image build to record the installed version.
+pub fn cacheClaudeInstalledVersion(allocator: std.mem.Allocator, version: []const u8) void {
+    const cache_path = getClaudeCachePath(allocator) orelse return;
+    defer allocator.free(cache_path);
+
+    // Read-merge-write: preserve latest_version and checked_at if they exist
+    var latest_buf: [64]u8 = undefined;
+    var latest: ?[]const u8 = null;
+    var checked_at: ?i64 = null;
+
+    if (utils.readFileContent(allocator, cache_path)) |content| {
+        defer allocator.free(content);
+        if (parseJsonString(allocator, content, "\"latest_version\"")) |v| {
+            const len = @min(v.len, latest_buf.len);
+            @memcpy(latest_buf[0..len], v[0..len]);
+            latest = latest_buf[0..len];
+            allocator.free(v);
+        }
+        checked_at = parseJsonInt(content, "\"checked_at\"");
+    } else |_| {}
+
+    writeClaudeCache(cache_path, version, latest, checked_at);
+}
+
+/// Check if a Claude Code update is available. Returns true if user accepts rebuild.
+pub fn checkClaudeUpdate(allocator: std.mem.Allocator) bool {
+    const cache_path = getClaudeCachePath(allocator) orelse return false;
+    defer allocator.free(cache_path);
+
+    // Backfill installed_version if missing (e.g. first run, corrupted cache)
+    const need_backfill = blk: {
+        const content = utils.readFileContent(allocator, cache_path) catch break :blk true;
+        defer allocator.free(content);
+        const v = parseJsonString(allocator, content, "\"installed_version\"") orelse break :blk true;
+        allocator.free(v);
+        break :blk v.len == 0;
+    };
+    if (need_backfill) {
+        const engine = @import("../core/engine.zig");
+        engine.cacheInstalledClaudeVersion(allocator);
+    }
+
+    const content = utils.readFileContent(allocator, cache_path) catch return false;
+    defer allocator.free(content);
+
+    const installed = parseJsonString(allocator, content, "\"installed_version\"") orelse return false;
+    defer allocator.free(installed);
+    const latest = parseJsonString(allocator, content, "\"latest_version\"") orelse return false;
+    defer allocator.free(latest);
+
+    if (!isNewer(latest, installed)) return false;
+
+    print("\nClaude Code v{s} available (installed: v{s})\n", .{ latest, installed });
+    prints("Rebuild image to update? [y/N]: ");
+
+    var buf: [16]u8 = undefined;
+    const n = utils.stdin_file.read(&buf) catch return false;
+    if (n == 0) return false;
+    const line = mem.trimRight(u8, buf[0..n], "\n\r");
+    return mem.eql(u8, line, "y") or mem.eql(u8, line, "Y");
+}
+
+/// Refresh the Claude Code latest-version cache in the background.
+pub fn refreshClaudeCacheInBackground(allocator: std.mem.Allocator) void {
+    const cache_path = getClaudeCachePath(allocator) orelse return;
+    defer allocator.free(cache_path);
+
+    // Skip if cache is fresh
+    if (utils.readFileContent(allocator, cache_path)) |content| {
+        defer allocator.free(content);
+        const checked_at = parseJsonInt(content, "\"checked_at\"") orelse 0;
+        const now = std.time.timestamp();
+        if (now - checked_at < cache_max_age_s) return;
+    } else |_| {}
+
+    const pid = std.posix.fork() catch return;
+    if (pid == 0) {
+        const grandchild_pid = std.posix.fork() catch std.process.exit(0);
+        if (grandchild_pid == 0) {
+            refreshClaudeCache(std.heap.page_allocator);
+            std.process.exit(0);
+        }
+        std.process.exit(0);
+    }
+
+    _ = std.posix.waitpid(pid, 0);
+}
+
+fn refreshClaudeCache(allocator: std.mem.Allocator) void {
+    const cache_path = getClaudeCachePath(allocator) orelse return;
+    defer allocator.free(cache_path);
+
+    const version = fetchLatestClaudeVersion(allocator) orelse return;
+    defer allocator.free(version);
+
+    // Read existing installed_version to preserve it
+    var installed_buf: [64]u8 = undefined;
+    var installed: ?[]const u8 = null;
+
+    if (utils.readFileContent(allocator, cache_path)) |content| {
+        defer allocator.free(content);
+        if (parseJsonString(allocator, content, "\"installed_version\"")) |v| {
+            const len = @min(v.len, installed_buf.len);
+            @memcpy(installed_buf[0..len], v[0..len]);
+            installed = installed_buf[0..len];
+            allocator.free(v);
+        }
+    } else |_| {}
+
+    writeClaudeCache(cache_path, installed, version, std.time.timestamp());
+}
+
+/// Fetch latest Claude Code version. Try GCS first, fall back to docker.
+fn fetchLatestClaudeVersion(allocator: std.mem.Allocator) ?[]const u8 {
+    // Try GCS endpoint (same as install.sh)
+    if (fetchFromGcs(allocator)) |v| return v;
+
+    // Fallback: run install.sh --check inside container
+    return fetchFromDocker(allocator);
+}
+
+fn fetchFromGcs(allocator: std.mem.Allocator) ?[]const u8 {
+    var child = std.process.Child.init(
+        &.{ "curl", "-sfS", "--max-time", "3", gcs_url },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return null;
+
+    const stdout = child.stdout.?;
+    var buf: [256]u8 = undefined;
+    var total: usize = 0;
+    while (total < buf.len) {
+        const n = stdout.read(buf[total..]) catch break;
+        if (n == 0) break;
+        total += n;
+    }
+    const term = child.wait() catch return null;
+    switch (term) {
+        .Exited => |code| if (code != 0) return null,
+        else => return null,
+    }
+
+    const trimmed = mem.trim(u8, buf[0..total], " \t\n\r");
+    if (trimmed.len == 0) return null;
+
+    // Validate it looks like a version
+    const engine = @import("../core/engine.zig");
+    const version = engine.extractVersion(trimmed) orelse return null;
+    return allocator.dupe(u8, version) catch null;
+}
+
+fn fetchFromDocker(allocator: std.mem.Allocator) ?[]const u8 {
+    var child = std.process.Child.init(
+        &.{ "docker", "run", "--rm", "--entrypoint", "bash", utils.image_name, "-c", "curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash -s -- --check 2>&1" },
+        allocator,
+    );
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    child.spawn() catch return null;
+
+    const stdout = child.stdout.?;
+    var body: std.ArrayList(u8) = .{};
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = stdout.read(&buf) catch break;
+        if (n == 0) break;
+        body.appendSlice(allocator, buf[0..n]) catch return null;
+    }
+    const term = child.wait() catch return null;
+    switch (term) {
+        .Exited => {},
+        else => return null,
+    }
+
+    // Extract version from output
+    const engine = @import("../core/engine.zig");
+    const version = engine.extractVersion(body.items) orelse {
+        body.deinit(allocator);
+        return null;
+    };
+    const result = allocator.dupe(u8, version) catch null;
+    body.deinit(allocator);
+    return result;
+}
+
+fn writeClaudeCache(cache_path: []const u8, installed: ?[]const u8, latest: ?[]const u8, checked_at: ?i64) void {
+    if (fs.path.dirname(cache_path)) |dir| {
+        fs.cwd().makePath(dir) catch {};
+    }
+    const file = fs.cwd().createFile(cache_path, .{}) catch return;
+    defer file.close();
+
+    var buf: [512]u8 = undefined;
+    const inst = installed orelse "";
+    const lat = latest orelse "";
+    const ts = checked_at orelse 0;
+    const json = std.fmt.bufPrint(&buf, "{{\"installed_version\":\"{s}\",\"latest_version\":\"{s}\",\"checked_at\":{d}}}", .{ inst, lat, ts }) catch return;
+    file.writeAll(json) catch {};
+}
+
 // ── Tests ────────────────────────────────────────────────────────────
 
 const testing = std.testing;

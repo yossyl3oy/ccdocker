@@ -195,10 +195,6 @@ pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_ho
 
     const work_mount = try std.fmt.allocPrint(allocator, "{s}:/work", .{work_dir});
     const config_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.claude", .{config_host});
-    const local_host = try fs.path.join(allocator, &.{ config_host, ".local" });
-    defer allocator.free(local_host);
-    fs.cwd().makePath(local_host) catch {};
-    const local_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.local", .{local_host});
 
     const home = utils.getHomeDir();
 
@@ -248,7 +244,6 @@ pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_ho
     // Work dir and config mounts
     try appendVolumeFlag(&argv, &owned, allocator, work_mount);
     try appendVolumeFlag(&argv, &owned, allocator, config_mount);
-    try appendVolumeFlag(&argv, &owned, allocator, local_mount);
     try argv.append(allocator, utils.image_name);
 
     for (exec_args[1..]) |arg| {
@@ -298,10 +293,6 @@ pub fn execRunCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_hos
 
     const work_mount = try std.fmt.allocPrint(allocator, "{s}:/work", .{work_dir});
     const config_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.claude", .{config_host});
-    const local_host = try fs.path.join(allocator, &.{ config_host, ".local" });
-    defer allocator.free(local_host);
-    fs.cwd().makePath(local_host) catch {};
-    const local_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.local", .{local_host});
 
     const home = utils.getHomeDir();
 
@@ -350,7 +341,6 @@ pub fn execRunCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_hos
     // Work dir and config mounts
     try appendVolumeFlag(&argv, &owned, allocator, work_mount);
     try appendVolumeFlag(&argv, &owned, allocator, config_mount);
-    try appendVolumeFlag(&argv, &owned, allocator, local_mount);
 
     // Image name must come last — everything after is treated as the container command
     try argv.append(allocator, utils.image_name);

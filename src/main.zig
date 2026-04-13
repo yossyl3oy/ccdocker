@@ -105,16 +105,10 @@ pub fn main() !void {
 
             const config_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.claude", .{config_host});
             defer allocator.free(config_mount);
-            const local_host = try std.fs.path.join(allocator, &.{ config_host, ".local" });
-            defer allocator.free(local_host);
-            std.fs.cwd().makePath(local_host) catch {};
-            const local_mount = try std.fmt.allocPrint(allocator, "{s}:/root/.local", .{local_host});
-            defer allocator.free(local_mount);
 
             const login_argv = [_][]const u8{
                 "docker",         "run",                             "--rm", "-it",
                 "-e",             "CLAUDE_CONFIG_DIR=/root/.claude", "-v",   config_mount,
-                "-v",             local_mount,
                 utils.image_name, "login",
             };
             return engine.execCmd(&login_argv);
@@ -163,7 +157,15 @@ pub fn main() !void {
             print("Profile: {s}\n", .{parsed.profile});
 
             update.notifyFromCache(allocator);
+
+            // Check for Claude Code updates; rebuild image if user accepts
+            if (update.checkClaudeUpdate(allocator)) {
+                engine.invalidateBuildHash(allocator, dockerfile_dir);
+                try engine.ensureImage(allocator, dockerfile_dir);
+            }
+
             update.refreshCacheInBackground(allocator);
+            update.refreshClaudeCacheInBackground(allocator);
 
             try docker.execRunCmd(allocator, work_dir, config_host);
         },
