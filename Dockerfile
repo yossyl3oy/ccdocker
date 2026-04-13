@@ -1,6 +1,7 @@
 FROM debian:bookworm-slim
 
 ENV HOME=/root
+ENV PATH=/root/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
@@ -12,7 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
   && ln -s /usr/bin/fdfind /usr/bin/fd \
   && curl -fsSL https://claude.ai/install.sh | bash \
-  && cp -aL /root/.local/bin/. /usr/local/bin/ \
   && GH_VERSION=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | jq -r .tag_name | sed 's/^v//') \
   && GH_ARCH=$(dpkg --print-architecture | sed 's/amd64/amd64/;s/arm64/arm64/') \
   && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \

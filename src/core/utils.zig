@@ -2,7 +2,7 @@ const std = @import("std");
 const fs = std.fs;
 const process = std.process;
 
-pub const version = "0.4.0";
+pub const version = "0.4.1";
 pub const image_name = "ccdocker";
 
 pub const stdout_file = fs.File.stdout();
