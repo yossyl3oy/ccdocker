@@ -9,7 +9,7 @@ const print = utils.print;
 
 pub fn resolveWorkDir(allocator: std.mem.Allocator, path: ?[]const u8) ![]const u8 {
     if (path) |p| {
-        const stat = fs.cwd().statFile(p) catch {
+        const stat = utils.cwd_dir.statFile(utils.io, p, .{}) catch {
             print("Error: directory '{s}' does not exist.\n", .{p});
             std.process.exit(1);
         };
@@ -18,11 +18,11 @@ pub fn resolveWorkDir(allocator: std.mem.Allocator, path: ?[]const u8) ![]const 
             std.process.exit(1);
         }
         var buf: [fs.max_path_bytes]u8 = undefined;
-        const real = try fs.cwd().realpath(p, &buf);
+        const real = try utils.realPath(p, &buf);
         return try allocator.dupe(u8, real);
     }
     var buf: [fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&buf);
+    const cwd = try utils.currentPath(&buf);
     return try allocator.dupe(u8, cwd);
 }
 
@@ -65,7 +65,7 @@ fn appendOptionalReadonlyMount(
     host_path: []const u8,
     container_path: []const u8,
 ) !void {
-    if (fs.cwd().access(host_path, .{})) |_| {
+    if (utils.cwd_dir.access(utils.io, host_path, .{})) |_| {
         const mount_spec = try std.fmt.allocPrint(allocator, "{s}:{s}:ro", .{ host_path, container_path });
         try appendVolumeFlag(args, owned, allocator, mount_spec);
     } else |_| {}
@@ -88,13 +88,15 @@ fn appendTerminalArgs(
     allocator: std.mem.Allocator,
 ) !void {
     // Forward TERM so the container detects terminal capabilities (image paste, colors)
-    if (std.posix.getenv("TERM")) |term| {
+    if (std.c.getenv("TERM")) |term_z| {
+        const term = std.mem.span(term_z);
         const val = try std.fmt.allocPrint(allocator, "TERM={s}", .{term});
         try appendEnvFlag(argv, owned, allocator, val);
     }
 
     // Forward COLORTERM for true-color support detection
-    if (std.posix.getenv("COLORTERM")) |ct| {
+    if (std.c.getenv("COLORTERM")) |ct_z| {
+        const ct = std.mem.span(ct_z);
         const val = try std.fmt.allocPrint(allocator, "COLORTERM={s}", .{ct});
         try appendEnvFlag(argv, owned, allocator, val);
     }
@@ -109,7 +111,7 @@ fn appendMirroredReadonlyMount(
     try appendOptionalReadonlyMount(argv, owned, allocator, host_path, host_path);
 
     var real_buf: [fs.max_path_bytes]u8 = undefined;
-    const real_path = fs.cwd().realpath(host_path, &real_buf) catch return;
+    const real_path = utils.realPath(host_path, &real_buf) catch return;
     if (!mem.eql(u8, real_path, host_path)) {
         try appendOptionalReadonlyMount(argv, owned, allocator, real_path, real_path);
     }
@@ -120,7 +122,8 @@ fn appendImagePasteMounts(
     owned: *std.ArrayList([]const u8),
     allocator: std.mem.Allocator,
 ) !void {
-    const tmpdir = std.posix.getenv("TMPDIR") orelse return;
+    const tmpdir_z = std.c.getenv("TMPDIR") orelse return;
+    const tmpdir = std.mem.span(tmpdir_z);
     try appendMirroredReadonlyMount(argv, owned, allocator, tmpdir);
 }
 
@@ -136,30 +139,32 @@ const ClipboardDaemon = struct {
 fn startClipboardDaemon() ?ClipboardDaemon {
     // Random auth token (hex-encoded)
     var raw: [16]u8 = undefined;
-    std.crypto.random.bytes(&raw);
+    utils.io.random(&raw);
     const token_hex = std.fmt.bytesToHex(raw, .lower);
 
-    const pipe_fds = std.posix.pipe() catch return null;
+    var pipe_fds: [2]std.posix.fd_t = undefined;
+    if (std.c.pipe(&pipe_fds) != 0) return null;
     errdefer {
-        std.posix.close(pipe_fds[0]);
-        std.posix.close(pipe_fds[1]);
+        _ = std.c.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[1]);
     }
 
-    const pid = std.posix.fork() catch return null;
+    const pid = std.c.fork();
+    if (pid < 0) return null;
     if (pid == 0) {
-        std.posix.close(pipe_fds[0]);
+        _ = std.c.close(pipe_fds[0]);
         clipboard.runDaemonWithReadyFd(0, &token_hex, pipe_fds[1]);
     }
 
-    std.posix.close(pipe_fds[1]);
-    defer std.posix.close(pipe_fds[0]);
+    _ = std.c.close(pipe_fds[1]);
+    defer _ = std.c.close(pipe_fds[0]);
 
     var port_buf: [2]u8 = undefined;
     var read_total: usize = 0;
     while (read_total < port_buf.len) {
-        const n = std.posix.read(pipe_fds[0], port_buf[read_total..]) catch return null;
-        if (n == 0) return null;
-        read_total += n;
+        const n = std.c.read(pipe_fds[0], port_buf[read_total..].ptr, port_buf.len - read_total);
+        if (n <= 0) return null;
+        read_total += @intCast(n);
     }
 
     const port = std.mem.readInt(u16, &port_buf, .little);
@@ -184,10 +189,10 @@ fn appendClipboardArgs(
 }
 
 pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_host: []const u8, exec_args: []const []const u8) !void {
-    var argv: std.ArrayList([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
 
-    var owned: std.ArrayList([]const u8) = .{};
+    var owned: std.ArrayList([]const u8) = .empty;
     defer {
         for (owned.items) |arg| allocator.free(arg);
         owned.deinit(allocator);
@@ -223,7 +228,7 @@ pub fn execExecCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_ho
     try appendOptionalReadonlyMount(&argv, &owned, allocator, ssh_dir, "/root/.ssh");
 
     // Extra mounts from config
-    var extra_mounts = mounts_mod.loadMounts(allocator) catch std.ArrayList([]const u8){};
+    var extra_mounts = mounts_mod.loadMounts(allocator) catch std.ArrayList([]const u8).empty;
     defer {
         for (extra_mounts.items) |mnt| allocator.free(mnt);
         extra_mounts.deinit(allocator);
@@ -261,7 +266,7 @@ test "resolveWorkDir with null returns cwd" {
     const result = try resolveWorkDir(testing.allocator, null);
     defer testing.allocator.free(result);
     var buf: [fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&buf);
+    const cwd = try utils.currentPath(&buf);
     try testing.expectEqualStrings(cwd, result);
 }
 
@@ -277,15 +282,15 @@ test "resolveWorkDir with . returns cwd" {
     const result = try resolveWorkDir(testing.allocator, ".");
     defer testing.allocator.free(result);
     var buf: [fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&buf);
+    const cwd = try utils.currentPath(&buf);
     try testing.expectEqualStrings(cwd, result);
 }
 
 pub fn execRunCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_host: []const u8) !void {
-    var argv: std.ArrayList([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
 
-    var owned: std.ArrayList([]const u8) = .{};
+    var owned: std.ArrayList([]const u8) = .empty;
     defer {
         for (owned.items) |arg| allocator.free(arg);
         owned.deinit(allocator);
@@ -320,7 +325,7 @@ pub fn execRunCmd(allocator: std.mem.Allocator, work_dir: []const u8, config_hos
     try appendOptionalReadonlyMount(&argv, &owned, allocator, ssh_dir, "/root/.ssh");
 
     // Extra mounts from config
-    var extra_mounts = mounts_mod.loadMounts(allocator) catch std.ArrayList([]const u8){};
+    var extra_mounts = mounts_mod.loadMounts(allocator) catch std.ArrayList([]const u8).empty;
     defer {
         for (extra_mounts.items) |mnt| allocator.free(mnt);
         extra_mounts.deinit(allocator);
@@ -367,10 +372,10 @@ test "resolveExtraMountPaths maps home-relative paths under root" {
 }
 
 test "appendMirroredReadonlyMount keeps original mount path" {
-    var argv: std.ArrayList([]const u8) = .{};
+    var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(testing.allocator);
 
-    var owned: std.ArrayList([]const u8) = .{};
+    var owned: std.ArrayList([]const u8) = .empty;
     defer {
         for (owned.items) |arg| testing.allocator.free(arg);
         owned.deinit(testing.allocator);

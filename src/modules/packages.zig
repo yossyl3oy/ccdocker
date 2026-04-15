@@ -12,7 +12,7 @@ pub const default_packages = [_][]const u8{
 };
 
 pub fn loadPackages(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var packages: std.ArrayList([]const u8) = .{};
+    var packages: std.ArrayList([]const u8) = .empty;
     var cfg = try config.loadConfig(allocator);
     defer cfg.deinit(allocator);
 
@@ -64,7 +64,7 @@ pub fn installPackages(allocator: std.mem.Allocator, new_packages: []const []con
         existing.deinit(allocator);
     }
 
-    var merged: std.ArrayList([]const u8) = .{};
+    var merged: std.ArrayList([]const u8) = .empty;
     defer {
         for (merged.items) |pkg| allocator.free(pkg);
         merged.deinit(allocator);
@@ -120,7 +120,7 @@ pub fn removePackages(allocator: std.mem.Allocator, remove_list: []const []const
         existing.deinit(allocator);
     }
 
-    var remaining: std.ArrayList([]const u8) = .{};
+    var remaining: std.ArrayList([]const u8) = .empty;
     defer {
         for (remaining.items) |pkg| allocator.free(pkg);
         remaining.deinit(allocator);

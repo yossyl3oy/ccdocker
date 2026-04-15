@@ -9,6 +9,7 @@ extern "c" fn posix_openpt(flags: c_int) c_int;
 extern "c" fn grantpt(fd: c_int) c_int;
 extern "c" fn unlockpt(fd: c_int) c_int;
 extern "c" fn ptsname(fd: c_int) ?[*:0]const u8;
+extern "c" fn execvp(file: [*:0]const u8, argv: [*:null]const ?[*:0]const u8) c_int;
 extern "c" fn setsid() c_int;
 extern "c" fn ioctl(fd: c_int, request: c_ulong, ...) c_int;
 
@@ -46,7 +47,7 @@ const State = enum {
 
 const InputInterceptor = struct {
     state: State = .passthrough,
-    paste_buf: std.ArrayList(u8) = .{},
+    paste_buf: std.ArrayList(u8) = .empty,
     // CSI parameter bytes collected between \x1b[ and the final byte
     csi_buf: [64]u8 = undefined,
     csi_len: u8 = 0,
@@ -229,22 +230,18 @@ const Action = union(enum) {
 fn clipboardHasImage() bool {
     const allocator = std.heap.page_allocator;
 
-    var child = std.process.Child.init(&.{ "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o" }, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return false;
+    const result = std.process.run(allocator, std.Options.debug_io, .{
+        .argv = &.{ "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o" },
+    }) catch return false;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    var result: [4096]u8 = undefined;
-    var total: usize = 0;
-    const stdout = child.stdout.?;
-    while (total < result.len) {
-        const n = stdout.read(result[total..]) catch break;
-        if (n == 0) break;
-        total += n;
+    switch (result.term) {
+        .exited => |code| if (code != 0) return false,
+        else => return false,
     }
-    _ = child.wait() catch return false;
 
-    const output = result[0..total];
+    const output = result.stdout;
     return mem.indexOf(u8, output, "image/png") != null or
         mem.indexOf(u8, output, "image/jpeg") != null or
         mem.indexOf(u8, output, "image/webp") != null;
@@ -254,7 +251,7 @@ fn clipboardHasImage() bool {
 
 var g_master_fd: posix.fd_t = -1;
 
-fn sigwinchHandler(_: c_int) callconv(.c) void {
+fn sigwinchHandler(_: posix.SIG) callconv(.c) void {
     if (g_master_fd < 0) return;
     var ws: Winsize = undefined;
     if (ioctl(posix.STDIN_FILENO, TIOCGWINSZ, &ws) == 0) {
@@ -262,45 +259,45 @@ fn sigwinchHandler(_: c_int) callconv(.c) void {
     }
 }
 
-fn sigchldHandler(_: c_int) callconv(.c) void {}
+fn sigchldHandler(_: posix.SIG) callconv(.c) void {}
 
 // ── Output helper ────────────────────────────────────────────────────
 
 fn writeMaster(master_fd: posix.fd_t, data: []const u8) void {
     var written: usize = 0;
     while (written < data.len) {
-        const n = posix.write(master_fd, data[written..]) catch return;
-        if (n == 0) return;
-        written += n;
+        const n = std.c.write(master_fd, data[written..].ptr, data.len - written);
+        if (n <= 0) return;
+        written += @intCast(n);
     }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-pub fn main() !void {
-    var args = std.process.args();
+pub fn main(init: std.process.Init.Minimal) !void {
+    var args = init.args.iterate();
     _ = args.skip();
 
-    var cmd_args: std.ArrayList([]const u8) = .{};
+    var cmd_args: std.ArrayList([]const u8) = .empty;
     const alloc = std.heap.page_allocator;
     while (args.next()) |arg| {
         try cmd_args.append(alloc, arg);
     }
 
     if (cmd_args.items.len == 0) {
-        std.fs.File.stderr().writeAll("Usage: pty-proxy <command> [args...]\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(std.Options.debug_io, "Usage: pty-proxy <command> [args...]\n") catch {};
         std.process.exit(1);
     }
 
     const clip_port: u16 = blk: {
-        const port_str = std.posix.getenv("CCDOCKER_CLIP_PORT") orelse break :blk 0;
-        break :blk std.fmt.parseInt(u16, port_str, 10) catch 0;
+        const port_str = std.c.getenv("CCDOCKER_CLIP_PORT") orelse break :blk 0;
+        break :blk std.fmt.parseInt(u16, std.mem.span(port_str), 10) catch 0;
     };
 
     // Open PTY
     const master_fd = posix_openpt(@bitCast(posix.O{ .ACCMODE = .RDWR, .NOCTTY = true }));
     if (master_fd < 0) return error.OpenPTYFailed;
-    defer posix.close(master_fd);
+    defer _ = std.c.close(master_fd);
 
     if (grantpt(master_fd) != 0) return error.GrantPTYFailed;
     if (unlockpt(master_fd) != 0) return error.UnlockPTYFailed;
@@ -331,19 +328,21 @@ pub fn main() !void {
     };
     posix.sigaction(posix.SIG.CHLD, &sa_chld, null);
 
-    const pid = try posix.fork();
+    const pid = std.c.fork();
+    if (pid < 0) return error.ForkFailed;
 
     if (pid == 0) {
-        posix.close(master_fd);
+        _ = std.c.close(master_fd);
         _ = setsid();
 
-        const slave_fd = posix.open(mem.span(slave_name), .{ .ACCMODE = .RDWR }, 0) catch std.process.exit(1);
+        const slave_fd = std.c.open(slave_name, @as(std.c.O, @bitCast(posix.O{ .ACCMODE = .RDWR })), @as(c_uint, 0));
+        if (slave_fd < 0) std.process.exit(1);
         _ = ioctl(slave_fd, TIOCSCTTY, @as(c_int, 0));
 
-        posix.dup2(slave_fd, posix.STDIN_FILENO) catch std.process.exit(1);
-        posix.dup2(slave_fd, posix.STDOUT_FILENO) catch std.process.exit(1);
-        posix.dup2(slave_fd, posix.STDERR_FILENO) catch std.process.exit(1);
-        if (slave_fd > posix.STDERR_FILENO) posix.close(slave_fd);
+        if (std.c.dup2(slave_fd, posix.STDIN_FILENO) < 0) std.process.exit(1);
+        if (std.c.dup2(slave_fd, posix.STDOUT_FILENO) < 0) std.process.exit(1);
+        if (std.c.dup2(slave_fd, posix.STDERR_FILENO) < 0) std.process.exit(1);
+        if (slave_fd > posix.STDERR_FILENO) _ = std.c.close(slave_fd);
 
         const argv_z = alloc.alloc(?[*:0]const u8, cmd_args.items.len + 1) catch std.process.exit(1);
         for (cmd_args.items, 0..) |arg, i| {
@@ -351,8 +350,7 @@ pub fn main() !void {
         }
         argv_z[cmd_args.items.len] = null;
 
-        const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
-        _ = std.posix.execvpeZ(argv_z[0].?, @ptrCast(argv_z.ptr), envp) catch {};
+        _ = execvp(argv_z[0].?, @ptrCast(argv_z.ptr));
         std.process.exit(127);
     }
 
@@ -400,8 +398,9 @@ pub fn main() !void {
         // stdin → master (with interception)
         if (fds[0].revents & posix.POLL.IN != 0) {
             var buf: [4096]u8 = undefined;
-            const nr = posix.read(stdin_fd, &buf) catch break;
-            if (nr == 0) break;
+            const nr_signed = std.c.read(stdin_fd, (&buf).ptr, buf.len);
+            if (nr_signed <= 0) break;
+            const nr: usize = @intCast(nr_signed);
 
             for (buf[0..nr]) |byte| {
                 const action = interceptor.feed(byte);
@@ -445,32 +444,35 @@ pub fn main() !void {
         // master → stdout (passthrough)
         if (fds[1].revents & posix.POLL.IN != 0) {
             var buf: [4096]u8 = undefined;
-            const nr = posix.read(master_fd, &buf) catch break;
-            if (nr == 0) {
+            const nr_signed = std.c.read(master_fd, (&buf).ptr, buf.len);
+            if (nr_signed <= 0) {
                 running = false;
                 break;
             }
-            _ = posix.write(stdout_fd, buf[0..nr]) catch break;
+            const nr: usize = @intCast(nr_signed);
+            _ = std.c.write(stdout_fd, buf[0..nr].ptr, nr);
         }
 
         if (fds[1].revents & posix.POLL.HUP != 0) {
             while (true) {
                 var buf: [4096]u8 = undefined;
-                const nr = posix.read(master_fd, &buf) catch break;
-                if (nr == 0) break;
-                _ = posix.write(stdout_fd, buf[0..nr]) catch break;
+                const nr_signed = std.c.read(master_fd, (&buf).ptr, buf.len);
+                if (nr_signed <= 0) break;
+                const nr: usize = @intCast(nr_signed);
+                _ = std.c.write(stdout_fd, buf[0..nr].ptr, nr);
             }
             running = false;
         }
     }
 
-    const wait_result = posix.waitpid(pid, 0);
+    var status: c_int = 0;
+    _ = std.c.waitpid(pid, &status, 0);
     posix.tcsetattr(stdin_fd, .FLUSH, orig_termios) catch {};
-
-    const status = wait_result.status;
     if (status & 0x7f == 0) {
-        std.process.exit(@truncate((status >> 8) & 0xff));
+        const exit_code: u8 = @intCast((status >> 8) & 0xff);
+        std.process.exit(exit_code);
     } else {
-        std.process.exit(128 + @as(u8, @truncate(status & 0x7f)));
+        const signal_code: u8 = @intCast(status & 0x7f);
+        std.process.exit(128 + signal_code);
     }
 }

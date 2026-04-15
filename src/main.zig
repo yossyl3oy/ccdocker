@@ -1,6 +1,4 @@
 const std = @import("std");
-const process = std.process;
-
 const utils = @import("core/utils.zig");
 const engine = @import("core/engine.zig");
 const args_mod = @import("modules/args.zig");
@@ -28,13 +26,11 @@ fn resolveProfile(allocator: std.mem.Allocator, parsed: *args_mod.ParsedArgs, di
     }
 }
 
-pub fn main() !void {
-    var gpa_state = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa_state.deinit();
-    const allocator = gpa_state.allocator();
+pub fn main(init: std.process.Init) !void {
+    utils.io = init.io;
 
-    const argv = try process.argsAlloc(allocator);
-    defer process.argsFree(allocator, argv);
+    const allocator = init.gpa;
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
 
     var parsed = args_mod.parseArgs(allocator, argv[1..]);
     defer parsed.deinit(allocator);

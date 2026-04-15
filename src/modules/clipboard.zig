@@ -1,8 +1,8 @@
 const std = @import("std");
-const net = std.net;
+const net = std.Io.net;
 const mem = std.mem;
 const process = std.process;
-
+const utils = @import("../core/utils.zig");
 extern "c" fn getppid() std.posix.pid_t;
 
 pub fn runDaemon(port: u16, token: []const u8) noreturn {
@@ -13,32 +13,33 @@ pub fn runDaemonWithReadyFd(port: u16, token: []const u8, ready_fd: ?std.posix.f
     const ppid = getppid();
     _ = std.Thread.spawn(.{}, watchParent, .{ppid}) catch {};
 
-    const addr: net.Address = .{ .in = net.Ip4Address.parse("0.0.0.0", port) catch std.process.exit(1) };
-    var server = addr.listen(.{ .reuse_address = true }) catch {
+    const addr = net.IpAddress.parseIp4("0.0.0.0", port) catch std.process.exit(1);
+    var server = addr.listen(utils.io, .{ .reuse_address = true }) catch {
         signalReady(ready_fd, null);
         std.process.exit(1);
     };
-    signalReady(ready_fd, server.listen_address.getPort());
+    defer server.deinit(utils.io);
+    signalReady(ready_fd, server.socket.address.getPort());
 
     while (true) {
-        const conn = server.accept() catch continue;
-        defer conn.stream.close();
+        const stream = server.accept(utils.io) catch continue;
+        defer stream.close(utils.io);
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
-        handleConnection(arena.allocator(), conn.stream, token);
+        handleConnection(arena.allocator(), stream, token);
     }
 }
 
 fn watchParent(ppid: std.posix.pid_t) void {
     while (true) {
-        std.Thread.sleep(2 * std.time.ns_per_s);
-        std.posix.kill(ppid, 0) catch std.process.exit(0);
+        std.Io.sleep(utils.io, std.Io.Duration.fromSeconds(2), .awake) catch {};
+        if (std.c.kill(ppid, @enumFromInt(0)) != 0) std.process.exit(0);
     }
 }
 
 fn signalReady(ready_fd: ?std.posix.fd_t, port: ?u16) void {
     if (ready_fd) |fd| {
-        defer std.posix.close(fd);
+        defer _ = std.c.close(fd);
 
         var buf: [2]u8 = .{ 0, 0 };
         if (port) |actual_port| {
@@ -47,16 +48,18 @@ fn signalReady(ready_fd: ?std.posix.fd_t, port: ?u16) void {
 
         var written: usize = 0;
         while (written < buf.len) {
-            const n = std.posix.write(fd, buf[written..]) catch return;
-            if (n == 0) return;
-            written += n;
+            const n = std.c.write(fd, buf[written..].ptr, buf.len - written);
+            if (n <= 0) return;
+            written += @intCast(n);
         }
     }
 }
 
 fn handleConnection(allocator: std.mem.Allocator, stream: net.Stream, token: []const u8) void {
     var buf: [16384]u8 = undefined;
-    const n = stream.read(&buf) catch return;
+    const read_n = std.c.read(stream.socket.handle, (&buf).ptr, buf.len);
+    if (read_n <= 0) return;
+    const n: usize = @intCast(read_n);
     if (n == 0) return;
     const request = buf[0..n];
 
@@ -121,10 +124,8 @@ fn headerValue(line: []const u8, name: []const u8) ?[]const u8 {
 fn sendResponse(stream: net.Stream, status: []const u8, body: []const u8) !void {
     var hdr: [256]u8 = undefined;
     const header = try std.fmt.bufPrint(&hdr, "HTTP/1.0 {s}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{ status, body.len });
-    try stream.writeAll(header);
-    if (body.len > 0) {
-        try stream.writeAll(body);
-    }
+    if (std.c.write(stream.socket.handle, header.ptr, header.len) < 0) return error.WriteFailed;
+    if (body.len > 0 and std.c.write(stream.socket.handle, body.ptr, body.len) < 0) return error.WriteFailed;
 }
 
 fn readPostBody(allocator: std.mem.Allocator, stream: net.Stream, request: []const u8) ![]u8 {
@@ -143,7 +144,7 @@ fn readPostBody(allocator: std.mem.Allocator, stream: net.Stream, request: []con
     const body_start = header_end + 4;
     const initial = request[body_start..];
 
-    var body: std.ArrayList(u8) = .{};
+    var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(allocator);
     const copy_len = @min(initial.len, content_length);
     try body.appendSlice(allocator, initial[0..copy_len]);
@@ -151,8 +152,9 @@ fn readPostBody(allocator: std.mem.Allocator, stream: net.Stream, request: []con
     while (body.items.len < content_length) {
         var rbuf: [4096]u8 = undefined;
         const max = @min(rbuf.len, content_length - body.items.len);
-        const rn = stream.read(rbuf[0..max]) catch break;
-        if (rn == 0) break;
+        const read_n = std.c.read(stream.socket.handle, rbuf[0..max].ptr, max);
+        if (read_n <= 0) break;
+        const rn: usize = @intCast(read_n);
         try body.appendSlice(allocator, rbuf[0..rn]);
     }
 
@@ -162,24 +164,9 @@ fn readPostBody(allocator: std.mem.Allocator, stream: net.Stream, request: []con
 // ── Clipboard operations ──────────────────────────────────────────────
 
 fn runCommand(allocator: std.mem.Allocator, argv: []const []const u8) ![]u8 {
-    var child = process.Child.init(argv, allocator);
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    try child.spawn();
-
-    const stdout_file = child.stdout.?;
-    var result: std.ArrayList(u8) = .{};
-    errdefer result.deinit(allocator);
-
-    var rbuf: [8192]u8 = undefined;
-    while (true) {
-        const rn = stdout_file.read(&rbuf) catch break;
-        if (rn == 0) break;
-        try result.appendSlice(allocator, rbuf[0..rn]);
-    }
-
-    _ = try child.wait();
-    return try result.toOwnedSlice(allocator);
+    const result = try std.process.run(allocator, utils.io, .{ .argv = argv });
+    defer allocator.free(result.stderr);
+    return result.stdout;
 }
 
 fn readText(allocator: std.mem.Allocator) ![]u8 {
@@ -211,7 +198,7 @@ fn readImage(allocator: std.mem.Allocator) ![]u8 {
         return try allocator.alloc(u8, 0);
     defer allocator.free(output);
 
-    const trimmed = mem.trimRight(u8, output, "\n\r \t");
+    const trimmed = mem.trim(u8, output, "\n\r \t");
     if (trimmed.len == 0) return try allocator.alloc(u8, 0);
 
     // Decode base64
@@ -226,7 +213,7 @@ fn readImage(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn readTargets(allocator: std.mem.Allocator) ![]u8 {
-    var result: std.ArrayList(u8) = .{};
+    var result: std.ArrayList(u8) = .empty;
     errdefer result.deinit(allocator);
 
     try result.appendSlice(allocator, "TARGETS\n");
@@ -259,16 +246,17 @@ fn readTargets(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn writeText(data: []const u8) void {
-    var child = process.Child.init(&.{"pbcopy"}, std.heap.page_allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return;
+    var child = std.process.spawn(utils.io, .{
+        .argv = &.{"pbcopy"},
+        .stdin = .pipe,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return;
 
     if (child.stdin) |stdin| {
-        _ = stdin.writeAll(data) catch {};
-        stdin.close();
+        stdin.writeStreamingAll(utils.io, data) catch {};
+        stdin.close(utils.io);
         child.stdin = null;
     }
-    _ = child.wait() catch {};
+    _ = child.wait(utils.io) catch {};
 }

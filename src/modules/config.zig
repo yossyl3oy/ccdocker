@@ -15,8 +15,8 @@ pub const Config = struct {
     pub fn init(allocator: std.mem.Allocator) Config {
         return .{
             .directories = std.StringHashMap([]const u8).init(allocator),
-            .packages = .{},
-            .mounts = .{},
+            .packages = .empty,
+            .mounts = .empty,
         };
     }
 
@@ -99,22 +99,22 @@ fn loadStringArrayInto(
     }
 }
 
-fn writeJsonString(file: fs.File, value: []const u8) !void {
-    try file.writeAll("\"");
+fn writeJsonString(file: std.Io.File, value: []const u8) !void {
+    try file.writeStreamingAll(utils.io, "\"");
     for (value) |c| {
         switch (c) {
-            '\\' => try file.writeAll("\\\\"),
-            '"' => try file.writeAll("\\\""),
-            '\n' => try file.writeAll("\\n"),
-            '\r' => try file.writeAll("\\r"),
-            '\t' => try file.writeAll("\\t"),
+            '\\' => try file.writeStreamingAll(utils.io, "\\\\"),
+            '"' => try file.writeStreamingAll(utils.io, "\\\""),
+            '\n' => try file.writeStreamingAll(utils.io, "\\n"),
+            '\r' => try file.writeStreamingAll(utils.io, "\\r"),
+            '\t' => try file.writeStreamingAll(utils.io, "\\t"),
             else => {
                 const buf = [1]u8{c};
-                try file.writeAll(&buf);
+                try file.writeStreamingAll(utils.io, &buf);
             },
         }
     }
-    try file.writeAll("\"");
+    try file.writeStreamingAll(utils.io, "\"");
 }
 
 fn loadConfigFromPath(allocator: std.mem.Allocator, config_path: []const u8) !Config {
@@ -132,43 +132,43 @@ fn loadConfigFromPath(allocator: std.mem.Allocator, config_path: []const u8) !Co
 
 fn saveConfigToPath(config_path: []const u8, data: *const Config) !void {
     if (fs.path.dirname(config_path)) |dir| {
-        fs.cwd().makePath(dir) catch {};
+        utils.cwd_dir.createDirPath(utils.io, dir) catch {};
     }
 
-    const file = try fs.cwd().createFile(config_path, .{});
-    defer file.close();
+    const file = try utils.cwd_dir.createFile(utils.io, config_path, .{});
+    defer file.close(utils.io);
 
-    try file.writeAll("{\"directories\":{");
+    try file.writeStreamingAll(utils.io, "{\"directories\":{");
     var first = true;
     var dir_it = data.directories.iterator();
     while (dir_it.next()) |entry| {
-        if (!first) try file.writeAll(",");
+        if (!first) try file.writeStreamingAll(utils.io, ",");
         first = false;
         try writeJsonString(file, entry.key_ptr.*);
-        try file.writeAll(":");
+        try file.writeStreamingAll(utils.io, ":");
         try writeJsonString(file, entry.value_ptr.*);
     }
-    try file.writeAll("}");
+    try file.writeStreamingAll(utils.io, "}");
 
     if (data.packages.items.len > 0) {
-        try file.writeAll(",\"packages\":[");
+        try file.writeStreamingAll(utils.io, ",\"packages\":[");
         for (data.packages.items, 0..) |pkg, idx| {
-            if (idx > 0) try file.writeAll(",");
+            if (idx > 0) try file.writeStreamingAll(utils.io, ",");
             try writeJsonString(file, pkg);
         }
-        try file.writeAll("]");
+        try file.writeStreamingAll(utils.io, "]");
     }
 
     if (data.mounts.items.len > 0) {
-        try file.writeAll(",\"mounts\":[");
+        try file.writeStreamingAll(utils.io, ",\"mounts\":[");
         for (data.mounts.items, 0..) |mnt, idx| {
-            if (idx > 0) try file.writeAll(",");
+            if (idx > 0) try file.writeStreamingAll(utils.io, ",");
             try writeJsonString(file, mnt);
         }
-        try file.writeAll("]");
+        try file.writeStreamingAll(utils.io, "]");
     }
 
-    try file.writeAll("}");
+    try file.writeStreamingAll(utils.io, "}");
 }
 
 pub fn loadConfig(allocator: std.mem.Allocator) !Config {
@@ -195,7 +195,7 @@ pub fn resolveDefaultProfileForDir(allocator: std.mem.Allocator, dir: []const u8
 
 pub fn resolveDefaultProfile(allocator: std.mem.Allocator) !?[]const u8 {
     var cwd_buf: [fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&cwd_buf);
+    const cwd = try utils.currentPath(&cwd_buf);
     return resolveDefaultProfileForDir(allocator, cwd);
 }
 
@@ -203,7 +203,7 @@ pub fn profileSet(allocator: std.mem.Allocator, profile: []const u8) !void {
     const home = utils.getHomeDir();
     const profile_path = try fs.path.join(allocator, &.{ home, ".claude-profiles", profile });
     defer allocator.free(profile_path);
-    fs.cwd().access(profile_path, .{}) catch {
+    utils.cwd_dir.access(utils.io, profile_path, .{}) catch {
         print("Error: profile '{s}' does not exist.\n\n", .{profile});
         prints("Available profiles:\n");
         profileList(allocator) catch {};
@@ -214,7 +214,7 @@ pub fn profileSet(allocator: std.mem.Allocator, profile: []const u8) !void {
     };
 
     var cwd_buf: [fs.max_path_bytes]u8 = undefined;
-    const cwd = try std.process.getCwd(&cwd_buf);
+    const cwd = try utils.currentPath(&cwd_buf);
 
     var data = try loadConfig(allocator);
     defer data.deinit(allocator);
@@ -238,7 +238,7 @@ pub fn profileSet(allocator: std.mem.Allocator, profile: []const u8) !void {
 pub fn profileDir(allocator: std.mem.Allocator, profile: []const u8) ![]const u8 {
     const home = utils.getHomeDir();
     const dir = try fs.path.join(allocator, &.{ home, ".claude-profiles", profile });
-    fs.cwd().makePath(dir) catch {};
+    utils.cwd_dir.createDirPath(utils.io, dir) catch {};
     return dir;
 }
 
@@ -251,15 +251,15 @@ pub fn profileList(allocator: std.mem.Allocator) !void {
     defer if (active) |a| allocator.free(a);
     const active_name = active orelse "default";
 
-    var dir = fs.cwd().openDir(profiles_path, .{ .iterate = true }) catch {
+    var dir = utils.cwd_dir.openDir(utils.io, profiles_path, .{}) catch {
         prints("No profiles found.\n");
         return;
     };
-    defer dir.close();
+    defer dir.close(utils.io);
 
     var found = false;
     var iter = dir.iterate();
-    while (try iter.next()) |entry| {
+    while (try iter.next(utils.io)) |entry| {
         if (entry.kind == .directory) {
             found = true;
             const name = entry.name;
@@ -270,7 +270,7 @@ pub fn profileList(allocator: std.mem.Allocator) !void {
             for (cred_files) |cred| {
                 const cred_path = fs.path.join(allocator, &.{ profiles_path, name, cred }) catch continue;
                 defer allocator.free(cred_path);
-                if (fs.cwd().access(cred_path, .{})) |_| {
+                if (utils.cwd_dir.access(utils.io, cred_path, .{})) |_| {
                     logged_in = true;
                     break;
                 } else |_| {}
@@ -296,14 +296,14 @@ test "loadConfigFromPath parses all sections" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const tmp_root = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const tmp_root = try tmp_dir.parent_dir.realPathFileAlloc(testing.io, &tmp_dir.sub_path, testing.allocator);
     defer testing.allocator.free(tmp_root);
     const path = try fs.path.join(testing.allocator, &.{ tmp_root, "config.json" });
     defer testing.allocator.free(path);
 
-    const file = try tmp_dir.dir.createFile("config.json", .{});
-    defer file.close();
-    try file.writeAll("{\"directories\":{\"/work\":\"dev\"},\"packages\":[\"tig\"],\"mounts\":[\".aws\",\"/tmp/secrets\"]}");
+    const file = try tmp_dir.dir.createFile(testing.io, "config.json", .{});
+    defer file.close(testing.io);
+    try file.writeStreamingAll(testing.io, "{\"directories\":{\"/work\":\"dev\"},\"packages\":[\"tig\"],\"mounts\":[\".aws\",\"/tmp/secrets\"]}");
 
     var data = try loadConfigFromPath(testing.allocator, path);
     defer data.deinit(testing.allocator);
@@ -320,7 +320,7 @@ test "saveConfigToPath preserves packages and mounts" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const tmp_root = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const tmp_root = try tmp_dir.parent_dir.realPathFileAlloc(testing.io, &tmp_dir.sub_path, testing.allocator);
     defer testing.allocator.free(tmp_root);
     const path = try fs.path.join(testing.allocator, &.{ tmp_root, "config.json" });
     defer testing.allocator.free(path);

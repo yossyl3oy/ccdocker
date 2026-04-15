@@ -47,9 +47,9 @@ pub fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) ParsedA
         .command = .run,
         .profile = "default",
         .path = null,
-        .packages = .{},
-        .mount_paths = .{},
-        .exec_args = .{},
+        .packages = .empty,
+        .mount_paths = .empty,
+        .exec_args = .empty,
         .profile_allocated = false,
         .path_allocated = false,
     };

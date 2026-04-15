@@ -10,10 +10,13 @@ const fatal = utils.fatal;
 const readFileContent = utils.readFileContent;
 
 pub fn runSimpleCmd(argv: []const []const u8, allocator: std.mem.Allocator) !std.process.Child.Term {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-    return try child.spawnAndWait();
+    _ = allocator;
+    var child = try std.process.spawn(utils.io, .{
+        .argv = argv,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    return try child.wait(utils.io);
 }
 
 const PreparedExecArgv = struct {
@@ -56,16 +59,17 @@ pub fn execCmd(argv: []const []const u8) void {
     if (argv.len == 0) {
         fatal("Error: empty command\n");
     }
-
-    const allocator = std.heap.page_allocator;
-    const prepared = prepareExecArgv(allocator, argv) catch {
-        fatal("Error: failed to prepare exec arguments\n");
-    };
-    defer prepared.deinit(allocator);
-
-    const envp = @as([*:null]const ?[*:0]const u8, @ptrCast(std.c.environ));
-    _ = std.posix.execvpeZ(prepared.argv[0].?, @ptrCast(prepared.argv.ptr), envp) catch {};
-    fatal("Error: failed to exec docker\n");
+    var child = std.process.spawn(utils.io, .{
+        .argv = argv,
+        .stdin = .inherit,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch fatal("Error: failed to exec docker\n");
+    const term = child.wait(utils.io) catch fatal("Error: failed to exec docker\n");
+    switch (term) {
+        .exited => |code| std.process.exit(code),
+        else => std.process.exit(1),
+    }
 }
 
 pub fn ensureDocker(allocator: std.mem.Allocator, dry_run: bool) void {
@@ -83,8 +87,9 @@ pub fn ensureDocker(allocator: std.mem.Allocator, dry_run: bool) void {
         fatal("Error: Docker daemon is not running.\nStart Docker Desktop or OrbStack, then re-run.\n");
     };
 
-    if (info_term.Exited != 0) {
-        fatal("Error: Docker daemon is not running.\nStart Docker Desktop or OrbStack, then re-run.\n");
+    switch (info_term) {
+        .exited => |code| if (code == 0) {} else fatal("Error: Docker daemon is not running.\nStart Docker Desktop or OrbStack, then re-run.\n"),
+        else => fatal("Error: Docker daemon is not running.\nStart Docker Desktop or OrbStack, then re-run.\n"),
     }
 }
 
@@ -102,15 +107,14 @@ fn installRuntime(allocator: std.mem.Allocator, dry_run: bool) void {
     prints("Choice [1/2]: ");
 
     var buf: [16]u8 = undefined;
-    const n = utils.stdin_file.read(&buf) catch 0;
+    const n = utils.readFileSome(utils.stdin_file, &buf) catch 0;
     if (n == 0) process.exit(1);
-    const line = mem.trimRight(u8, buf[0..n], "\n\r");
+    const line = mem.trim(u8, buf[0..n], "\n\r");
 
     if (mem.eql(u8, line, "1")) {
         prints("Installing OrbStack via Homebrew...\n");
         if (!dry_run) {
-            var child = std.process.Child.init(&.{ "brew", "install", "--cask", "orbstack" }, allocator);
-            _ = child.spawnAndWait() catch {};
+            _ = runSimpleCmd(&.{ "brew", "install", "--cask", "orbstack" }, allocator) catch {};
         } else {
             prints("[dry-run] Skipping actual installation.\n");
         }
@@ -118,8 +122,7 @@ fn installRuntime(allocator: std.mem.Allocator, dry_run: bool) void {
     } else if (mem.eql(u8, line, "2")) {
         prints("Installing Docker Desktop via Homebrew...\n");
         if (!dry_run) {
-            var child = std.process.Child.init(&.{ "brew", "install", "--cask", "docker" }, allocator);
-            _ = child.spawnAndWait() catch {};
+            _ = runSimpleCmd(&.{ "brew", "install", "--cask", "docker" }, allocator) catch {};
         } else {
             prints("[dry-run] Skipping actual installation.\n");
         }
@@ -132,8 +135,8 @@ fn installRuntime(allocator: std.mem.Allocator, dry_run: bool) void {
 
 pub fn getDockerfileDir(allocator: std.mem.Allocator) ![]const u8 {
     var buf: [fs.max_path_bytes]u8 = undefined;
-    const self_path = try fs.selfExePath(&buf);
-    return try allocator.dupe(u8, fs.path.dirname(self_path) orelse ".");
+    const n = try std.process.executableDirPath(utils.io, &buf);
+    return try allocator.dupe(u8, buf[0..n]);
 }
 
 /// Build the image if needed. `claude_version` overrides the CLAUDE_VERSION
@@ -158,7 +161,10 @@ pub fn ensureImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, cla
 
     const image_exists = blk: {
         const term = runSimpleCmd(&.{ "docker", "image", "inspect", utils.image_name }, allocator) catch break :blk false;
-        break :blk term.Exited == 0;
+        break :blk switch (term) {
+            .exited => |code| code == 0,
+            else => false,
+        };
     };
 
     if (!mem.eql(u8, current_hash, previous_hash) or !image_exists) {
@@ -222,10 +228,10 @@ pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, pa
     argv_buf[argc] = dockerfile_dir;
     argc += 1;
 
-    var child = std.process.Child.init(argv_buf[0..argc], allocator);
-    const term = try child.spawnAndWait();
-    if (term.Exited != 0) {
-        fatal("Error: image build failed.\n");
+    const term = try runSimpleCmd(argv_buf[0..argc], allocator);
+    switch (term) {
+        .exited => |code| if (code == 0) {} else fatal("Error: image build failed.\n"),
+        else => fatal("Error: image build failed.\n"),
     }
 
     // Update build hash
@@ -233,9 +239,9 @@ pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, pa
     defer allocator.free(current_hash);
     const hash_path = try fs.path.join(allocator, &.{ dockerfile_dir, ".build_hash" });
     defer allocator.free(hash_path);
-    if (fs.cwd().createFile(hash_path, .{})) |file| {
-        defer file.close();
-        file.writeAll(current_hash) catch {};
+    if (utils.cwd_dir.createFile(utils.io, hash_path, .{})) |file| {
+        defer file.close(utils.io);
+        utils.writeFileAll(file, current_hash);
     } else |_| {}
 
     // Cache the installed Claude Code version
@@ -246,35 +252,24 @@ pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, pa
 pub fn invalidateBuildHash(allocator: std.mem.Allocator, dockerfile_dir: []const u8) void {
     const hash_path = fs.path.join(allocator, &.{ dockerfile_dir, ".build_hash" }) catch return;
     defer allocator.free(hash_path);
-    fs.cwd().deleteFile(hash_path) catch {};
+    utils.cwd_dir.deleteFile(utils.io, hash_path) catch {};
 }
 
 /// Run `docker run --rm --entrypoint claude <image> --version` and cache the version.
 pub fn cacheInstalledClaudeVersion(allocator: std.mem.Allocator) void {
-    var child = std.process.Child.init(
-        &.{ "docker", "run", "--rm", "--entrypoint", "claude", utils.image_name, "--version" },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return;
+    const result = std.process.run(allocator, utils.io, .{
+        .argv = &.{ "docker", "run", "--rm", "--entrypoint", "claude", utils.image_name, "--version" },
+    }) catch return;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    const stdout = child.stdout.?;
-    var buf: [256]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = stdout.read(buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
-    }
-    const term = child.wait() catch return;
-    switch (term) {
-        .Exited => |code| if (code != 0) return,
+    switch (result.term) {
+        .exited => |code| if (code != 0) return,
         else => return,
     }
 
     // Extract version (N.N.N) from output like "2.1.104 (Claude Code)"
-    const version = extractVersion(buf[0..total]) orelse return;
+    const version = extractVersion(result.stdout) orelse return;
 
     const update = @import("../modules/update.zig");
     update.cacheClaudeInstalledVersion(allocator, version);

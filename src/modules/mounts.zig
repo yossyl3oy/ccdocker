@@ -22,7 +22,7 @@ pub fn normalizePath(allocator: std.mem.Allocator, path: []const u8) ![]const u8
 }
 
 pub fn loadMounts(allocator: std.mem.Allocator) !std.ArrayList([]const u8) {
-    var mounts: std.ArrayList([]const u8) = .{};
+    var mounts: std.ArrayList([]const u8) = .empty;
     var cfg = try config.loadConfig(allocator);
     defer cfg.deinit(allocator);
 
@@ -54,7 +54,7 @@ pub fn mountAdd(allocator: std.mem.Allocator, new_paths: []const []const u8) !vo
         existing.deinit(allocator);
     }
 
-    var merged: std.ArrayList([]const u8) = .{};
+    var merged: std.ArrayList([]const u8) = .empty;
     defer {
         for (merged.items) |mnt| allocator.free(mnt);
         merged.deinit(allocator);
@@ -123,7 +123,7 @@ pub fn mountRemove(allocator: std.mem.Allocator, remove_list: []const []const u8
         existing.deinit(allocator);
     }
 
-    var remaining: std.ArrayList([]const u8) = .{};
+    var remaining: std.ArrayList([]const u8) = .empty;
     defer {
         for (remaining.items) |mnt| allocator.free(mnt);
         remaining.deinit(allocator);

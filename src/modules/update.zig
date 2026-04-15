@@ -34,9 +34,11 @@ pub fn refreshCacheInBackground(allocator: std.mem.Allocator) void {
         return;
     }
 
-    const pid = std.posix.fork() catch return;
+    const pid = std.c.fork();
+    if (pid < 0) return;
     if (pid == 0) {
-        const grandchild_pid = std.posix.fork() catch std.process.exit(0);
+        const grandchild_pid = std.c.fork();
+        if (grandchild_pid < 0) std.process.exit(0);
         if (grandchild_pid == 0) {
             refreshCache(std.heap.page_allocator);
             std.process.exit(0);
@@ -44,7 +46,7 @@ pub fn refreshCacheInBackground(allocator: std.mem.Allocator) void {
         std.process.exit(0);
     }
 
-    _ = std.posix.waitpid(pid, 0);
+    _ = std.c.waitpid(pid, null, 0);
 }
 
 // ── Version comparison ───────────────────────────────────────────────
@@ -73,8 +75,9 @@ fn isNewer(latest: []const u8, current: []const u8) bool {
 // ── Cache ────────────────────────────────────────────────────────────
 
 fn getCachePath(allocator: std.mem.Allocator) ?[]const u8 {
-    const home = std.posix.getenv("HOME") orelse return null;
-    return fs.path.join(allocator, &.{ home, ".config", "ccdocker", "update-check.json" }) catch null;
+    const home = std.c.getenv("HOME") orelse return null;
+    const home_path = std.mem.span(home);
+    return fs.path.join(allocator, &.{ home_path, ".config", "ccdocker", "update-check.json" }) catch null;
 }
 
 /// Try to read the cached latest version. Returns null if cache is stale or missing.
@@ -84,7 +87,7 @@ fn readCache(allocator: std.mem.Allocator, cache_path: []const u8) ?[]const u8 {
 
     // Parse checked_at
     const checked_at = parseJsonInt(content, "\"checked_at\"") orelse return null;
-    const now = std.time.timestamp();
+    const now = std.Io.Timestamp.now(utils.io, .real).toSeconds();
     if (now - checked_at > cache_max_age_s) return null;
 
     // Parse latest_version
@@ -93,15 +96,15 @@ fn readCache(allocator: std.mem.Allocator, cache_path: []const u8) ?[]const u8 {
 
 fn writeCache(cache_path: []const u8, version: []const u8) void {
     if (fs.path.dirname(cache_path)) |dir| {
-        fs.cwd().makePath(dir) catch {};
+        utils.cwd_dir.createDirPath(utils.io, dir) catch {};
     }
-    const file = fs.cwd().createFile(cache_path, .{}) catch return;
-    defer file.close();
+    const file = utils.cwd_dir.createFile(utils.io, cache_path, .{}) catch return;
+    defer file.close(utils.io);
 
     var buf: [256]u8 = undefined;
-    const now = std.time.timestamp();
+    const now = std.Io.Timestamp.now(utils.io, .real).toSeconds();
     const json = std.fmt.bufPrint(&buf, "{{\"latest_version\":\"{s}\",\"checked_at\":{d}}}", .{ version, now }) catch return;
-    file.writeAll(json) catch {};
+    utils.writeFileAll(file, json);
 }
 
 // ── Minimal JSON helpers ─────────────────────────────────────────────
@@ -158,32 +161,19 @@ fn refreshCache(allocator: std.mem.Allocator) void {
 }
 
 fn fetchLatestTag(allocator: std.mem.Allocator) ?[]const u8 {
-    var child = std.process.Child.init(
-        &.{ "curl", "-sfS", "--max-time", "3", api_url },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
+    const result = std.process.run(allocator, utils.io, .{
+        .argv = &.{ "curl", "-sfS", "--max-time", "3", api_url },
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    const stdout = child.stdout.?;
-    var body: std.ArrayList(u8) = .{};
-    errdefer body.deinit(allocator);
-
-    var buf: [8192]u8 = undefined;
-    while (true) {
-        const n = stdout.read(&buf) catch break;
-        if (n == 0) break;
-        body.appendSlice(allocator, buf[0..n]) catch return null;
-    }
-    const term = child.wait() catch return null;
-    switch (term) {
-        .Exited => |code| if (code != 0) return null,
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
         else => return null,
     }
 
     // Find "tag_name": "vX.Y.Z"
-    return parseJsonString(allocator, body.items, "\"tag_name\"");
+    return parseJsonString(allocator, result.stdout, "\"tag_name\"");
 }
 
 // ── Claude Code version check ───────────────────────────────────────
@@ -191,8 +181,9 @@ fn fetchLatestTag(allocator: std.mem.Allocator) ?[]const u8 {
 const gcs_url = "https://storage.googleapis.com/claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/claude-code-releases/latest";
 
 fn getClaudeCachePath(allocator: std.mem.Allocator) ?[]const u8 {
-    const home = std.posix.getenv("HOME") orelse return null;
-    return fs.path.join(allocator, &.{ home, ".config", "ccdocker", "claude-cli-check.json" }) catch null;
+    const home = std.c.getenv("HOME") orelse return null;
+    const home_path = std.mem.span(home);
+    return fs.path.join(allocator, &.{ home_path, ".config", "ccdocker", "claude-cli-check.json" }) catch null;
 }
 
 /// Called by engine.zig after a successful image build to record the installed version.
@@ -269,9 +260,9 @@ pub fn checkClaudeUpdate(allocator: std.mem.Allocator) bool {
     prints("Rebuild image to update? [y/N]: ");
 
     var buf: [16]u8 = undefined;
-    const n = utils.stdin_file.read(&buf) catch return false;
+    const n = utils.readFileSome(utils.stdin_file, &buf) catch return false;
     if (n == 0) return false;
-    const line = mem.trimRight(u8, buf[0..n], "\n\r");
+    const line = mem.trim(u8, buf[0..n], "\n\r");
     return mem.eql(u8, line, "y") or mem.eql(u8, line, "Y");
 }
 
@@ -284,13 +275,15 @@ pub fn refreshClaudeCacheInBackground(allocator: std.mem.Allocator) void {
     if (utils.readFileContent(allocator, cache_path)) |content| {
         defer allocator.free(content);
         const checked_at = parseJsonInt(content, "\"checked_at\"") orelse 0;
-        const now = std.time.timestamp();
+        const now = std.Io.Timestamp.now(utils.io, .real).toSeconds();
         if (now - checked_at < cache_max_age_s) return;
     } else |_| {}
 
-    const pid = std.posix.fork() catch return;
+    const pid = std.c.fork();
+    if (pid < 0) return;
     if (pid == 0) {
-        const grandchild_pid = std.posix.fork() catch std.process.exit(0);
+        const grandchild_pid = std.c.fork();
+        if (grandchild_pid < 0) std.process.exit(0);
         if (grandchild_pid == 0) {
             refreshClaudeCache(std.heap.page_allocator);
             std.process.exit(0);
@@ -298,7 +291,7 @@ pub fn refreshClaudeCacheInBackground(allocator: std.mem.Allocator) void {
         std.process.exit(0);
     }
 
-    _ = std.posix.waitpid(pid, 0);
+    _ = std.c.waitpid(pid, null, 0);
 }
 
 fn refreshClaudeCache(allocator: std.mem.Allocator) void {
@@ -322,7 +315,7 @@ fn refreshClaudeCache(allocator: std.mem.Allocator) void {
         }
     } else |_| {}
 
-    writeClaudeCache(cache_path, installed, version, std.time.timestamp());
+    writeClaudeCache(cache_path, installed, version, std.Io.Timestamp.now(utils.io, .real).toSeconds());
 }
 
 /// Fetch latest Claude Code version. Try GCS first, fall back to docker.
@@ -335,29 +328,18 @@ fn fetchLatestClaudeVersion(allocator: std.mem.Allocator) ?[]const u8 {
 }
 
 fn fetchFromGcs(allocator: std.mem.Allocator) ?[]const u8 {
-    var child = std.process.Child.init(
-        &.{ "curl", "-sfS", "--max-time", "3", gcs_url },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
+    const result = std.process.run(allocator, utils.io, .{
+        .argv = &.{ "curl", "-sfS", "--max-time", "3", gcs_url },
+    }) catch return null;
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
 
-    const stdout = child.stdout.?;
-    var buf: [256]u8 = undefined;
-    var total: usize = 0;
-    while (total < buf.len) {
-        const n = stdout.read(buf[total..]) catch break;
-        if (n == 0) break;
-        total += n;
-    }
-    const term = child.wait() catch return null;
-    switch (term) {
-        .Exited => |code| if (code != 0) return null,
+    switch (result.term) {
+        .exited => |code| if (code != 0) return null,
         else => return null,
     }
 
-    const trimmed = mem.trim(u8, buf[0..total], " \t\n\r");
+    const trimmed = mem.trim(u8, result.stdout, " \t\n\r");
     if (trimmed.len == 0) return null;
 
     // Validate it looks like a version
@@ -367,52 +349,36 @@ fn fetchFromGcs(allocator: std.mem.Allocator) ?[]const u8 {
 }
 
 fn fetchFromDocker(allocator: std.mem.Allocator) ?[]const u8 {
-    var child = std.process.Child.init(
-        &.{ "docker", "run", "--rm", "--entrypoint", "bash", utils.image_name, "-c", "curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash -s -- --check 2>&1" },
-        allocator,
-    );
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-    child.spawn() catch return null;
+    const proc_result = std.process.run(allocator, utils.io, .{
+        .argv = &.{ "docker", "run", "--rm", "--entrypoint", "bash", utils.image_name, "-c", "curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash -s -- --check 2>&1" },
+    }) catch return null;
+    defer allocator.free(proc_result.stdout);
+    defer allocator.free(proc_result.stderr);
 
-    const stdout = child.stdout.?;
-    var body: std.ArrayList(u8) = .{};
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = stdout.read(&buf) catch break;
-        if (n == 0) break;
-        body.appendSlice(allocator, buf[0..n]) catch return null;
-    }
-    const term = child.wait() catch return null;
-    switch (term) {
-        .Exited => {},
+    switch (proc_result.term) {
+        .exited => {},
         else => return null,
     }
 
     // Extract version from output
     const engine = @import("../core/engine.zig");
-    const version = engine.extractVersion(body.items) orelse {
-        body.deinit(allocator);
-        return null;
-    };
-    const result = allocator.dupe(u8, version) catch null;
-    body.deinit(allocator);
-    return result;
+    const version = engine.extractVersion(proc_result.stdout) orelse return null;
+    return allocator.dupe(u8, version) catch null;
 }
 
 fn writeClaudeCache(cache_path: []const u8, installed: ?[]const u8, latest: ?[]const u8, checked_at: ?i64) void {
     if (fs.path.dirname(cache_path)) |dir| {
-        fs.cwd().makePath(dir) catch {};
+        utils.cwd_dir.createDirPath(utils.io, dir) catch {};
     }
-    const file = fs.cwd().createFile(cache_path, .{}) catch return;
-    defer file.close();
+    const file = utils.cwd_dir.createFile(utils.io, cache_path, .{}) catch return;
+    defer file.close(utils.io);
 
     var buf: [512]u8 = undefined;
     const inst = installed orelse "";
     const lat = latest orelse "";
     const ts = checked_at orelse 0;
     const json = std.fmt.bufPrint(&buf, "{{\"installed_version\":\"{s}\",\"latest_version\":\"{s}\",\"checked_at\":{d}}}", .{ inst, lat, ts }) catch return;
-    file.writeAll(json) catch {};
+    utils.writeFileAll(file, json);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────
@@ -483,7 +449,7 @@ test "writeCache and readCache round-trip" {
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    const tmp_root = try tmp_dir.dir.realpathAlloc(testing.allocator, ".");
+    const tmp_root = try tmp_dir.parent_dir.realPathFileAlloc(testing.io, &tmp_dir.sub_path, testing.allocator);
     defer testing.allocator.free(tmp_root);
     const path = try fs.path.join(testing.allocator, &.{ tmp_root, "update-check.json" });
     defer testing.allocator.free(path);
