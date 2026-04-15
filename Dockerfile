@@ -12,12 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     jq \
     ca-certificates \
   && ln -s /usr/bin/fdfind /usr/bin/fd \
-  && curl -fsSL https://claude.ai/install.sh | bash \
   && GH_VERSION=$(curl -fsSL https://api.github.com/repos/cli/cli/releases/latest | jq -r .tag_name | sed 's/^v//') \
   && GH_ARCH=$(dpkg --print-architecture | sed 's/amd64/amd64/;s/arm64/arm64/') \
   && curl -fsSL "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${GH_ARCH}.tar.gz" \
      | tar xz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_${GH_ARCH}/bin/gh" \
   && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/*
+
+ARG CLAUDE_VERSION=""
+RUN curl -fsSL https://claude.ai/install.sh | bash
 
 ARG EXTRA_PACKAGES=""
 RUN if [ -n "$EXTRA_PACKAGES" ]; then \

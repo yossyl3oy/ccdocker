@@ -96,7 +96,7 @@ pub fn main() !void {
             engine.ensureDocker(allocator, parsed.dry_run);
             const dockerfile_dir = try engine.getDockerfileDir(allocator);
             defer allocator.free(dockerfile_dir);
-            try engine.ensureImage(allocator, dockerfile_dir);
+            try engine.ensureImage(allocator, dockerfile_dir, null);
 
             const config_host = try config.profileDir(allocator, parsed.profile);
             defer allocator.free(config_host);
@@ -118,7 +118,7 @@ pub fn main() !void {
             engine.ensureDocker(allocator, parsed.dry_run);
             const dockerfile_dir = try engine.getDockerfileDir(allocator);
             defer allocator.free(dockerfile_dir);
-            try engine.ensureImage(allocator, dockerfile_dir);
+            try engine.ensureImage(allocator, dockerfile_dir, null);
 
             const work_dir = try docker.resolveWorkDir(allocator, parsed.path);
             defer allocator.free(work_dir);
@@ -132,7 +132,7 @@ pub fn main() !void {
             engine.ensureDocker(allocator, parsed.dry_run);
             const dockerfile_dir = try engine.getDockerfileDir(allocator);
             defer allocator.free(dockerfile_dir);
-            try engine.ensureImage(allocator, dockerfile_dir);
+            try engine.ensureImage(allocator, dockerfile_dir, null);
 
             const work_dir = try docker.resolveWorkDir(allocator, parsed.path);
             defer allocator.free(work_dir);
@@ -145,7 +145,7 @@ pub fn main() !void {
             engine.ensureDocker(allocator, parsed.dry_run);
             const dockerfile_dir = try engine.getDockerfileDir(allocator);
             defer allocator.free(dockerfile_dir);
-            try engine.ensureImage(allocator, dockerfile_dir);
+            try engine.ensureImage(allocator, dockerfile_dir, null);
 
             const work_dir = try docker.resolveWorkDir(allocator, parsed.path);
             defer allocator.free(work_dir);
@@ -160,8 +160,10 @@ pub fn main() !void {
 
             // Check for Claude Code updates; rebuild image if user accepts
             if (update.checkClaudeUpdate(allocator)) {
+                const latest = update.getCachedClaudeLatestVersion(allocator);
+                defer if (latest) |v| allocator.free(v);
                 engine.invalidateBuildHash(allocator, dockerfile_dir);
-                try engine.ensureImage(allocator, dockerfile_dir);
+                try engine.ensureImage(allocator, dockerfile_dir, latest);
             }
 
             update.refreshCacheInBackground(allocator);

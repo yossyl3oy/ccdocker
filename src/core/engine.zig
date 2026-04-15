@@ -136,7 +136,10 @@ pub fn getDockerfileDir(allocator: std.mem.Allocator) ![]const u8 {
     return try allocator.dupe(u8, fs.path.dirname(self_path) orelse ".");
 }
 
-pub fn ensureImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8) !void {
+/// Build the image if needed. `claude_version` overrides the CLAUDE_VERSION
+/// build arg — pass the latest version to bust the Docker layer cache for a
+/// CLI update, or null for normal rebuilds (preserves the installed version).
+pub fn ensureImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, claude_version: ?[]const u8) !void {
     const packages_mod = @import("../modules/packages.zig");
     var packages = try packages_mod.loadPackages(allocator);
     defer {
@@ -159,17 +162,38 @@ pub fn ensureImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8) !vo
     };
 
     if (!mem.eql(u8, current_hash, previous_hash) or !image_exists) {
-        try rebuildImage(allocator, dockerfile_dir, packages.items);
+        try rebuildImage(allocator, dockerfile_dir, packages.items, claude_version);
     }
 }
 
-pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, packages: []const []const u8) !void {
+/// Rebuild the Docker image. When `claude_version` is non-null it is passed
+/// as `--build-arg CLAUDE_VERSION=<ver>` to bust the Claude Code install
+/// layer cache. When null the installed version is used so the layer stays
+/// cached during normal (non-CLI-update) rebuilds.
+pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, packages: []const []const u8, claude_version: ?[]const u8) !void {
     const packages_mod = @import("../modules/packages.zig");
     const extra = try packages_mod.buildExtraPackagesArg(allocator, packages);
     defer allocator.free(extra);
 
     const build_arg = try std.fmt.allocPrint(allocator, "EXTRA_PACKAGES={s}", .{extra});
     defer allocator.free(build_arg);
+
+    // Determine CLAUDE_VERSION build arg: explicit version for CLI updates,
+    // otherwise the currently installed version to keep the layer cached.
+    const update_mod = @import("../modules/update.zig");
+    const owned_ver: ?[]const u8 = if (claude_version == null)
+        update_mod.getCachedClaudeInstalledVersion(allocator)
+    else
+        null;
+    defer if (owned_ver) |v| allocator.free(v);
+
+    const effective_ver = claude_version orelse if (owned_ver) |v| v else null;
+
+    const claude_build_arg: ?[]const u8 = if (effective_ver) |v|
+        std.fmt.allocPrint(allocator, "CLAUDE_VERSION={s}", .{v}) catch null
+    else
+        null;
+    defer if (claude_build_arg) |arg| allocator.free(arg);
 
     prints("Building ccdocker image...\n");
 
@@ -183,6 +207,12 @@ pub fn rebuildImage(allocator: std.mem.Allocator, dockerfile_dir: []const u8, pa
         argv_buf[argc] = "--build-arg";
         argc += 1;
         argv_buf[argc] = build_arg;
+        argc += 1;
+    }
+    if (claude_build_arg) |arg| {
+        argv_buf[argc] = "--build-arg";
+        argc += 1;
+        argv_buf[argc] = arg;
         argc += 1;
     }
     argv_buf[argc] = "-t";

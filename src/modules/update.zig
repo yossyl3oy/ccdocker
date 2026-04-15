@@ -219,6 +219,24 @@ pub fn cacheClaudeInstalledVersion(allocator: std.mem.Allocator, version: []cons
     writeClaudeCache(cache_path, version, latest, checked_at);
 }
 
+/// Return the cached latest Claude Code version (caller must free).
+pub fn getCachedClaudeLatestVersion(allocator: std.mem.Allocator) ?[]const u8 {
+    const cache_path = getClaudeCachePath(allocator) orelse return null;
+    defer allocator.free(cache_path);
+    const content = utils.readFileContent(allocator, cache_path) catch return null;
+    defer allocator.free(content);
+    return parseJsonString(allocator, content, "\"latest_version\"");
+}
+
+/// Return the cached installed Claude Code version (caller must free).
+pub fn getCachedClaudeInstalledVersion(allocator: std.mem.Allocator) ?[]const u8 {
+    const cache_path = getClaudeCachePath(allocator) orelse return null;
+    defer allocator.free(cache_path);
+    const content = utils.readFileContent(allocator, cache_path) catch return null;
+    defer allocator.free(content);
+    return parseJsonString(allocator, content, "\"installed_version\"");
+}
+
 /// Check if a Claude Code update is available. Returns true if user accepts rebuild.
 pub fn checkClaudeUpdate(allocator: std.mem.Allocator) bool {
     const cache_path = getClaudeCachePath(allocator) orelse return false;

@@ -95,7 +95,7 @@ pub fn installPackages(allocator: std.mem.Allocator, new_packages: []const []con
     engine.ensureDocker(allocator, false);
     const dockerfile_dir = try engine.getDockerfileDir(allocator);
     defer allocator.free(dockerfile_dir);
-    try engine.rebuildImage(allocator, dockerfile_dir, merged.items);
+    try engine.rebuildImage(allocator, dockerfile_dir, merged.items, null);
 
     try savePackages(allocator, merged.items);
 
@@ -149,7 +149,7 @@ pub fn removePackages(allocator: std.mem.Allocator, remove_list: []const []const
     engine.ensureDocker(allocator, false);
     const dockerfile_dir = try engine.getDockerfileDir(allocator);
     defer allocator.free(dockerfile_dir);
-    try engine.rebuildImage(allocator, dockerfile_dir, remaining.items);
+    try engine.rebuildImage(allocator, dockerfile_dir, remaining.items, null);
 
     try savePackages(allocator, remaining.items);
 
