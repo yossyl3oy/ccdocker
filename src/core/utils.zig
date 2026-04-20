@@ -2,7 +2,7 @@ const std = @import("std");
 const fs = std.fs;
 const process = std.process;
 
-pub const version = "0.5.0";
+pub const version = "0.5.1";
 pub const image_name = "ccdocker";
 pub var io: std.Io = std.Options.debug_io;
 pub const cwd_dir = std.Io.Dir.cwd();

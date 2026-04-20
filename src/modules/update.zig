@@ -246,6 +246,8 @@ pub fn checkClaudeUpdate(allocator: std.mem.Allocator) bool {
         engine.cacheInstalledClaudeVersion(allocator);
     }
 
+    ensureFreshClaudeLatestCache(allocator, cache_path);
+
     const content = utils.readFileContent(allocator, cache_path) catch return false;
     defer allocator.free(content);
 
@@ -264,6 +266,22 @@ pub fn checkClaudeUpdate(allocator: std.mem.Allocator) bool {
     if (n == 0) return false;
     const line = mem.trim(u8, buf[0..n], "\n\r");
     return mem.eql(u8, line, "y") or mem.eql(u8, line, "Y");
+}
+
+fn ensureFreshClaudeLatestCache(allocator: std.mem.Allocator, cache_path: []const u8) void {
+    if (utils.readFileContent(allocator, cache_path)) |content| {
+        defer allocator.free(content);
+
+        if (parseJsonString(allocator, content, "\"latest_version\"")) |latest| {
+            defer allocator.free(latest);
+
+            const checked_at = parseJsonInt(content, "\"checked_at\"") orelse 0;
+            const now = std.Io.Timestamp.now(utils.io, .real).toSeconds();
+            if (latest.len > 0 and now - checked_at < cache_max_age_s) return;
+        }
+    } else |_| {}
+
+    refreshClaudeCache(allocator);
 }
 
 /// Refresh the Claude Code latest-version cache in the background.
