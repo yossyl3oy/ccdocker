@@ -37,7 +37,7 @@ brew install ccdocker
 
 ### Build from source
 
-Requires [Zig](https://ziglang.org/) 0.15+.
+Requires [Zig](https://ziglang.org/) 0.16.0.
 
 ```bash
 git clone https://github.com/yossyl3oy/ccdocker.git
@@ -150,6 +150,7 @@ Paths are automatically mapped (e.g. `~/.aws` → `/root/.aws`). Extra mounts ar
 The Docker image (Debian slim) includes tools commonly used by Claude Code:
 
 - `git`, `openssh-client`
+- `gh` (GitHub CLI)
 - `ripgrep` (rg)
 - `fd-find` (fd)
 - `curl`, `jq`
