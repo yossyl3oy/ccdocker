@@ -9,6 +9,8 @@
 
 </div>
 
+<video src="https://github.com/yossyl3oy/ccdocker/raw/main/assets/demo.mp4" controls width="720"></video>
+
 Run [Claude Code](https://claude.ai) inside Docker with profile-based account management.
 
 > **Note:** This project is experimental. Some Claude Code features (e.g. voice mode, computer use) are not yet supported but may be added in the future.
