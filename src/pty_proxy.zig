@@ -227,10 +227,12 @@ const Action = union(enum) {
 
 // ── Clipboard bridge query ───────────────────────────────────────────
 
+var g_io: std.Io = std.Options.debug_io;
+
 fn clipboardHasImage() bool {
     const allocator = std.heap.page_allocator;
 
-    const result = std.process.run(allocator, std.Options.debug_io, .{
+    const result = std.process.run(allocator, g_io, .{
         .argv = &.{ "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o" },
     }) catch return false;
     defer allocator.free(result.stdout);
@@ -274,8 +276,10 @@ fn writeMaster(master_fd: posix.fd_t, data: []const u8) void {
 
 // ── Main ─────────────────────────────────────────────────────────────
 
-pub fn main(init: std.process.Init.Minimal) !void {
-    var args = init.args.iterate();
+pub fn main(init: std.process.Init) !void {
+    g_io = init.io;
+
+    var args = init.minimal.args.iterate();
     _ = args.skip();
 
     var cmd_args: std.ArrayList([]const u8) = .empty;
@@ -285,7 +289,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (cmd_args.items.len == 0) {
-        std.Io.File.stderr().writeStreamingAll(std.Options.debug_io, "Usage: pty-proxy <command> [args...]\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(g_io, "Usage: pty-proxy <command> [args...]\n") catch {};
         std.process.exit(1);
     }
 

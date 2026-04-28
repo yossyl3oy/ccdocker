@@ -291,6 +291,20 @@ pub fn extractVersion(input: []const u8) ?[]const u8 {
     return null;
 }
 
+fn hashFileStreaming(hasher: *Sha256, path: []const u8) !void {
+    const file = try utils.cwd_dir.openFile(utils.io, path, .{});
+    defer file.close(utils.io);
+    var buf: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = file.readStreaming(utils.io, &.{&buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        if (n == 0) break;
+        hasher.update(buf[0..n]);
+    }
+}
+
 fn computeHash(allocator: std.mem.Allocator, dir: []const u8, packages: []const []const u8) ![]const u8 {
     var hasher = Sha256.init(.{});
 
@@ -315,10 +329,7 @@ fn computeHash(allocator: std.mem.Allocator, dir: []const u8, packages: []const 
 
     const pty_proxy = try fs.path.join(allocator, &.{ dir, "pty-proxy" });
     defer allocator.free(pty_proxy);
-    if (readFileContent(allocator, pty_proxy)) |pp_content| {
-        defer allocator.free(pp_content);
-        hasher.update(pp_content);
-    } else |_| {}
+    hashFileStreaming(&hasher, pty_proxy) catch {};
 
     for (packages) |pkg| {
         hasher.update(pkg);
