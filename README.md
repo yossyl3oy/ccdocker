@@ -7,9 +7,9 @@
 [![License](https://img.shields.io/github/license/yossyl3oy/ccdocker)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20(Apple%20Silicon)-blue)](https://github.com/yossyl3oy/ccdocker)
 
-</div>
+![demo](assets/demo.gif)
 
-<video src="https://github.com/yossyl3oy/ccdocker/raw/main/assets/demo.mp4" controls width="720"></video>
+</div>
 
 Run [Claude Code](https://claude.ai) inside Docker with profile-based account management.
 
